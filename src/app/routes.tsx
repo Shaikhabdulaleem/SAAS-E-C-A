@@ -17,6 +17,8 @@ import { DealDetail } from "./pages/crm/DealDetail";
 import { Campaigns } from "./pages/email/Campaigns";
 import { CampaignDetail } from "./pages/email/CampaignDetail";
 import { Templates } from "./pages/email/Templates";
+import { Suppressions } from "./pages/email/Suppressions";
+import { AudienceSetup } from "./pages/email/AudienceSetup";
 import { ColdCampaigns } from "./pages/cold-email/ColdCampaigns";
 import { ColdCampaignDetail } from "./pages/cold-email/ColdCampaignDetail";
 import { ColdMailboxes } from "./pages/cold-email/Mailboxes";
@@ -76,8 +78,10 @@ export const router = createBrowserRouter([
       { path: "proposals/:id/edit", element: withService("proposals", <ProposalCreate />) },
       { path: "finance", element: withService("finance", <Finance />) },
       { path: "campaigns", element: withService("email_marketing", <Campaigns />) },
+      { path: "audience-setup", element: withService("email_marketing", <AudienceSetup />) },
       { path: "campaigns/:id", element: withService("email_marketing", <CampaignDetail />) },
       { path: "templates", element: withService("email_marketing", <Templates />) },
+      { path: "suppressions", element: withService("email_marketing", <Suppressions />) },
       { path: "cold-email/campaigns", element: withService("cold_email", <ColdCampaigns />) },
       { path: "cold-email/campaigns/:id", element: withService("cold_email", <ColdCampaignDetail />) },
       { path: "cold-email/mailboxes", element: withService("cold_email", <ColdMailboxes />) },

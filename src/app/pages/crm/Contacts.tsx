@@ -11,6 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '../../components/ui/dropdown-menu';
 import { Avatar, AvatarFallback } from '../../components/ui/avatar';
 import { Separator } from '../../components/ui/separator';
+import { Switch } from '../../components/ui/switch';
 
 const AVATAR_COLORS = [
   'bg-indigo-500',
@@ -45,6 +46,8 @@ export function Contacts() {
     source: 'manual' as 'manual' | 'import' | 'campaign' | 'api',
     assignedTo: '',
     tags: '',
+    marketingConsent: false,
+    marketingConsentSource: '',
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
 
@@ -92,9 +95,11 @@ export function Contacts() {
       status: form.status,
       source: form.source,
       tags: form.tags.split(',').map(t => t.trim()).filter(Boolean),
+      marketingConsent: form.marketingConsent,
+      marketingConsentSource: form.marketingConsentSource.trim() || (form.marketingConsent ? 'manual' : undefined),
     });
     setShowModal(false);
-    setForm({ firstName: '', lastName: '', email: '', phone: '', jobTitle: '', companyId: 'none', status: 'lead', source: 'manual', assignedTo: '', tags: '' });
+    setForm({ firstName: '', lastName: '', email: '', phone: '', jobTitle: '', companyId: 'none', status: 'lead', source: 'manual', assignedTo: '', tags: '', marketingConsent: false, marketingConsentSource: '' });
     setErrors({});
   };
 
@@ -199,6 +204,21 @@ export function Contacts() {
               <div className="space-y-1.5">
                 <Label>Tags</Label>
                 <Input value={form.tags} onChange={e => set('tags', e.target.value)} placeholder="high-value, decision-maker" />
+              </div>
+              <div className="space-y-3 rounded-lg border border-border p-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <Label>Marketing Consent</Label>
+                    <p className="text-xs text-muted-foreground">Required before this contact can receive Email Marketing campaigns.</p>
+                  </div>
+                  <Switch checked={form.marketingConsent} onCheckedChange={value => setForm(f => ({ ...f, marketingConsent: value }))} />
+                </div>
+                {form.marketingConsent && (
+                  <div className="space-y-1.5">
+                    <Label>Consent Source</Label>
+                    <Input value={form.marketingConsentSource} onChange={e => set('marketingConsentSource', e.target.value)} placeholder="manual, signup form, import" />
+                  </div>
+                )}
               </div>
               <div className="flex items-center justify-end gap-3 pt-2 border-t border-border mt-2">
                 <Button type="button" variant="outline" size="sm" onClick={() => setShowModal(false)}>Cancel</Button>

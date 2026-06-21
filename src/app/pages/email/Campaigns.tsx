@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useData } from '../../contexts/DataContext';
 import { Link } from 'react-router';
-import { Plus, Mail, Eye, MousePointerClick, Send, Clock, CheckCircle, BarChart2, MoreHorizontal, X, ShieldCheck } from 'lucide-react';
+import { Plus, Mail, Eye, MousePointerClick, Send, Clock, CheckCircle, BarChart2, MoreHorizontal, X, ShieldCheck, Users, Upload } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../../components/ui/card';
 import { Button } from '../../components/ui/button';
 import { Badge } from '../../components/ui/badge';
@@ -13,17 +13,19 @@ import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select';
 import { Switch } from '../../components/ui/switch';
+import { Textarea } from '../../components/ui/textarea';
 
 const statusConfig: Record<string, { label: string; className: string; icon: React.ElementType }> = {
   draft: { label: 'Draft', className: 'bg-muted text-muted-foreground', icon: Clock },
   scheduled: { label: 'Scheduled', className: 'bg-sky-50 text-sky-700', icon: Clock },
   sending: { label: 'Sending', className: 'bg-amber-50 text-amber-700', icon: Send },
   sent: { label: 'Sent', className: 'bg-emerald-50 text-emerald-700', icon: CheckCircle },
+  partial_failed: { label: 'Partial Failed', className: 'bg-orange-50 text-orange-700', icon: ShieldCheck },
   cancelled: { label: 'Cancelled', className: 'bg-red-50 text-red-700', icon: Mail },
 };
 
 export function Campaigns() {
-  const { campaigns, addCampaign, deleteCampaign, sendCampaignNow, apiError } = useData();
+  const { campaigns, contacts, companies, addCampaign, deleteCampaign, sendCampaignNow, apiError } = useData();
   const [filter, setFilter] = useState('all');
   const [showModal, setShowModal] = useState(false);
   const [form, setForm] = useState({
@@ -33,6 +35,7 @@ export function Campaigns() {
     fromName: '',
     fromEmail: '',
     replyToEmail: '',
+    body: '',
     status: 'draft' as 'draft' | 'scheduled',
     scheduledAt: '',
     trackOpens: true,
@@ -40,10 +43,30 @@ export function Campaigns() {
     gdprConsent: false,
     doubleOptIn: false,
     companyAddress: '',
+    audienceType: 'customers',
+    tag: 'all',
+    companyId: 'all',
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   const filteredCampaigns = campaigns.filter(c => filter === 'all' || c.status === filter);
+  const marketableContacts = contacts.filter(c => c.marketingConsent);
+  const marketableCustomers = marketableContacts.filter(c => c.status === 'customer');
+  const availableTags = useMemo(() => Array.from(new Set(contacts.flatMap(c => c.tags))).sort(), [contacts]);
+  const recipientFilter = useMemo(() => {
+    if (form.audienceType === 'customers') return { mode: 'all', statuses: ['customer'] };
+    if (form.audienceType === 'leads') return { mode: 'all', statuses: ['lead', 'prospect'] };
+    if (form.audienceType === 'tag' && form.tag !== 'all') return { mode: 'all', tags: [form.tag] };
+    if (form.audienceType === 'company' && form.companyId !== 'all') return { mode: 'all', companyId: form.companyId };
+    return { mode: 'all' };
+  }, [form.audienceType, form.tag, form.companyId]);
+  const estimatedRecipients = useMemo(() => contacts.filter(contact => {
+    if (!contact.marketingConsent) return false;
+    if (recipientFilter.statuses?.length && !recipientFilter.statuses.includes(contact.status)) return false;
+    if (recipientFilter.tags?.length && !recipientFilter.tags.some(tag => contact.tags.includes(tag))) return false;
+    if (recipientFilter.companyId && contact.companyId !== recipientFilter.companyId) return false;
+    return true;
+  }).length, [contacts, recipientFilter]);
 
   const totalSent = campaigns.filter(c => c.status === 'sent').reduce((sum, c) => sum + c.totalRecipients, 0);
   const totalOpens = campaigns.filter(c => c.status === 'sent').reduce((sum, c) => sum + c.openCount, 0);
@@ -65,6 +88,7 @@ export function Campaigns() {
     if (!form.subject.trim()) e.subject = 'Subject line is required';
     if (!form.fromName.trim()) e.fromName = 'Sender name is required';
     if (!form.fromEmail.trim()) e.fromEmail = 'Sender email is required';
+    if (!form.body.trim()) e.body = 'Email body is required';
     if (form.status === 'scheduled' && !form.scheduledAt) e.scheduledAt = 'Schedule date is required';
     return e;
   };
@@ -80,6 +104,8 @@ export function Campaigns() {
       fromName: form.fromName.trim(),
       fromEmail: form.fromEmail.trim(),
       replyToEmail: form.replyToEmail.trim() || undefined,
+      body: form.body.trim(),
+      bodyPlainText: form.body.trim().replace(/<[^>]+>/g, ' '),
       status: form.status,
       scheduledAt: form.status === 'scheduled' ? form.scheduledAt : undefined,
       totalRecipients: 0,
@@ -92,9 +118,10 @@ export function Campaigns() {
       gdprConsent: form.gdprConsent,
       doubleOptIn: form.doubleOptIn,
       companyAddress: form.companyAddress.trim() || undefined,
+      recipientFilter,
     });
     setShowModal(false);
-    setForm({ name: '', subject: '', previewText: '', fromName: '', fromEmail: '', replyToEmail: '', status: 'draft', scheduledAt: '', trackOpens: true, trackClicks: true, gdprConsent: false, doubleOptIn: false, companyAddress: '' });
+    setForm({ name: '', subject: '', previewText: '', fromName: '', fromEmail: '', replyToEmail: '', body: '', status: 'draft', scheduledAt: '', trackOpens: true, trackClicks: true, gdprConsent: false, doubleOptIn: false, companyAddress: '', audienceType: 'customers', tag: 'all', companyId: 'all' });
     setErrors({});
   };
 
@@ -198,6 +225,71 @@ export function Campaigns() {
                 />
               </div>
 
+              <div className="space-y-1.5">
+                <Label htmlFor="camp-body" className="text-sm">Email Body</Label>
+                <Textarea
+                  id="camp-body"
+                  placeholder="Write the email content. HTML links will be tracked when click tracking is enabled."
+                  value={form.body}
+                  onChange={e => set('body', e.target.value)}
+                  className={errors.body ? 'border-destructive min-h-[120px]' : 'min-h-[120px]'}
+                />
+                {errors.body && <p className="text-xs text-destructive">{errors.body}</p>}
+              </div>
+
+              <Separator />
+
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Audience</p>
+                  <Badge variant="secondary" className="text-xs">{estimatedRecipients} estimated recipients</Badge>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label className="text-sm">Recipient Group</Label>
+                    <Select value={form.audienceType} onValueChange={v => setForm(f => ({ ...f, audienceType: v, tag: 'all', companyId: 'all' }))}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="customers">All Customers</SelectItem>
+                        <SelectItem value="all">All Marketable Contacts</SelectItem>
+                        <SelectItem value="leads">Leads & Prospects</SelectItem>
+                        <SelectItem value="tag">By Tag</SelectItem>
+                        <SelectItem value="company">By Company</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  {form.audienceType === 'tag' && (
+                    <div className="space-y-1.5">
+                      <Label className="text-sm">Tag</Label>
+                      <Select value={form.tag} onValueChange={v => setForm(f => ({ ...f, tag: v }))}>
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">Choose tag</SelectItem>
+                          {availableTags.map(tag => <SelectItem key={tag} value={tag}>{tag}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
+                  {form.audienceType === 'company' && (
+                    <div className="space-y-1.5">
+                      <Label className="text-sm">Company</Label>
+                      <Select value={form.companyId} onValueChange={v => setForm(f => ({ ...f, companyId: v }))}>
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">Choose company</SelectItem>
+                          {companies.map(company => <SelectItem key={company.id} value={company.id}>{company.name}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
+                </div>
+                {marketableContacts.length === 0 && (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                    No opted-in contacts are available yet. Add customers in Audience Setup before sending.
+                  </div>
+                )}
+              </div>
+
               <Separator />
 
               <div className="space-y-3">
@@ -280,11 +372,40 @@ export function Campaigns() {
           <h1 className="text-foreground">Email Campaigns</h1>
           <p className="text-sm text-muted-foreground mt-0.5">Create and manage your email marketing campaigns</p>
         </div>
-        <Button size="sm" onClick={() => setShowModal(true)}>
-          <Plus className="h-4 w-4 mr-1.5" />
-          New Campaign
-        </Button>
+        <div className="flex gap-2">
+          <Button size="sm" variant="outline" asChild>
+            <Link to="/audience-setup">
+              <Upload className="h-4 w-4 mr-1.5" />
+              Audience Setup
+            </Link>
+          </Button>
+          <Button size="sm" onClick={() => setShowModal(true)}>
+            <Plus className="h-4 w-4 mr-1.5" />
+            New Campaign
+          </Button>
+        </div>
       </div>
+
+      {marketableContacts.length === 0 && (
+        <Card>
+          <CardContent className="p-6 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 rounded-xl bg-indigo-50">
+                <Users className="h-5 w-5 text-indigo-600" />
+              </div>
+              <div>
+                <h2 className="text-base font-semibold text-foreground">Add your audience before launching campaigns</h2>
+                <p className="text-sm text-muted-foreground mt-1">
+                  Import customers, connect Google Sheets, or add opted-in contacts manually so campaigns have valid recipients.
+                </p>
+              </div>
+            </div>
+            <Button size="sm" asChild>
+              <Link to="/audience-setup">Set Up Audience</Link>
+            </Button>
+          </CardContent>
+        </Card>
+      )}
 
       {/* KPI Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -452,10 +573,20 @@ export function Campaigns() {
                         subject: campaign.subject,
                         fromName: campaign.fromName,
                         fromEmail: campaign.fromEmail,
+                        body: campaign.body,
+                        bodyPlainText: campaign.bodyPlainText,
                         status: 'draft',
                         totalRecipients: 0,
                         openCount: 0,
                         clickCount: 0,
+                        bounceCount: 0,
+                        unsubCount: 0,
+                        trackOpens: campaign.trackOpens,
+                        trackClicks: campaign.trackClicks,
+                        gdprConsent: campaign.gdprConsent,
+                        doubleOptIn: campaign.doubleOptIn,
+                        companyAddress: campaign.companyAddress,
+                        recipientFilter: campaign.recipientFilter,
                       })}>Duplicate</DropdownMenuItem>
                       <Separator className="my-1" />
                       <DropdownMenuItem className="text-destructive" onClick={() => {

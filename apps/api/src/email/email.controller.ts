@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Delete, Get, Headers, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Headers, Param, Patch, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { UserRole } from '@prisma/client';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { RequireService } from '../auth/decorators/required-service.decorator';
@@ -44,14 +44,39 @@ export class EmailController {
     return this.email.scheduleCampaign(tenantId(user, selectedTenantId), campaignId, body);
   }
 
+  @Post(':campaignId/audience-preview')
+  audiencePreview(@CurrentUser() user: AuthenticatedUser, @Param('campaignId') campaignId: string, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.email.previewAudience(tenantId(user, selectedTenantId), campaignId, body);
+  }
+
   @Post(':campaignId/send-now')
   sendNow(@CurrentUser() user: AuthenticatedUser, @Param('campaignId') campaignId: string, @Headers('x-tenant-id') selectedTenantId?: string) {
     return this.email.sendCampaignNow(tenantId(user, selectedTenantId), campaignId);
   }
 
+  @Post(':campaignId/cancel')
+  cancel(@CurrentUser() user: AuthenticatedUser, @Param('campaignId') campaignId: string, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.email.cancelCampaign(tenantId(user, selectedTenantId), campaignId);
+  }
+
   @Post(':campaignId/send-test')
   sendTest(@CurrentUser() user: AuthenticatedUser, @Param('campaignId') campaignId: string, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
     return this.email.sendTest(tenantId(user, selectedTenantId), campaignId, body);
+  }
+
+  @Get(':campaignId/recipients')
+  recipients(@CurrentUser() user: AuthenticatedUser, @Param('campaignId') campaignId: string, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.email.listRecipients(tenantId(user, selectedTenantId), campaignId);
+  }
+
+  @Get(':campaignId/events')
+  events(@CurrentUser() user: AuthenticatedUser, @Param('campaignId') campaignId: string, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.email.listEvents(tenantId(user, selectedTenantId), campaignId);
+  }
+
+  @Get(':campaignId/analytics')
+  analytics(@CurrentUser() user: AuthenticatedUser, @Param('campaignId') campaignId: string, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.email.analytics(tenantId(user, selectedTenantId), campaignId);
   }
 
   @Delete(':campaignId')
@@ -114,13 +139,17 @@ export class EmailEventsController {
   constructor(private readonly email: EmailService) {}
 
   @Get('open/:token')
-  open(@Param('token') token: string, @Req() req: { headers?: Record<string, string>; ip?: string }) {
-    return this.email.trackEvent('open', token, { userAgent: req.headers?.['user-agent'], ipAddress: req.ip });
+  async open(@Param('token') token: string, @Req() req: { headers?: Record<string, string>; ip?: string }, @Res() res: { setHeader: (name: string, value: string) => void; end: (body?: Buffer) => void }) {
+    await this.email.trackEvent('open', token, { userAgent: req.headers?.['user-agent'], ipAddress: req.ip });
+    res.setHeader('Content-Type', 'image/gif');
+    res.setHeader('Cache-Control', 'no-store');
+    res.end(Buffer.from('R0lGODlhAQABAPAAAP///wAAACH5BAAAAAAALAAAAAABAAEAAAICRAEAOw==', 'base64'));
   }
 
   @Get('click/:token')
-  click(@Param('token') token: string, @Query('url') url: string, @Req() req: { headers?: Record<string, string>; ip?: string }) {
-    return this.email.trackEvent('click', token, { userAgent: req.headers?.['user-agent'], ipAddress: req.ip, url });
+  async click(@Param('token') token: string, @Query('url') url: string, @Req() req: { headers?: Record<string, string>; ip?: string }, @Res() res: { redirect: (url: string) => void }) {
+    const result = await this.email.trackEvent('click', token, { userAgent: req.headers?.['user-agent'], ipAddress: req.ip, url });
+    res.redirect(result.redirectUrl || '/');
   }
 
   @Get('unsubscribe/:token')
@@ -134,7 +163,7 @@ export class EmailWebhookController {
   constructor(private readonly email: EmailService) {}
 
   @Post('sendgrid')
-  sendgrid(@Body() body: unknown) {
-    return this.email.handleProviderEvents(body);
+  sendgrid(@Body() body: unknown, @Headers() headers: Record<string, string | string[] | undefined>) {
+    return this.email.handleProviderEvents(body, headers);
   }
 }

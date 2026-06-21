@@ -1,6 +1,45 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { ContactSource, ContactStatus, DealStatus, Prisma } from '@prisma/client';
+import { google } from 'googleapis';
 import { PrismaService } from '../prisma/prisma.service';
+
+type ImportMapping = {
+  firstName?: string;
+  lastName?: string;
+  email?: string;
+  phone?: string;
+  jobTitle?: string;
+  company?: string;
+  status?: string;
+  tags?: string;
+  marketingConsent?: string;
+  marketingConsentSource?: string;
+};
+
+type ImportRow = Record<string, unknown>;
+
+type NormalizedImportRow = {
+  rowNumber: number;
+  firstName: string;
+  lastName: string;
+  email: string;
+  phone?: string;
+  jobTitle?: string;
+  companyName?: string;
+  status: ContactStatus;
+  tags: string[];
+  marketingConsent: boolean;
+  marketingConsentSource?: string;
+  provided: {
+    firstName: boolean;
+    lastName: boolean;
+    phone: boolean;
+    jobTitle: boolean;
+    company: boolean;
+    status: boolean;
+    tags: boolean;
+  };
+};
 
 @Injectable()
 export class CrmService {
@@ -36,8 +75,12 @@ export class CrmService {
           status: this.optionalEnum(body.status, Object.values(ContactStatus), ContactStatus.lead),
           source: this.optionalEnum(body.source, Object.values(ContactSource), ContactSource.manual),
           tags: this.stringArray(body.tags),
+          marketingConsent: this.optionalBoolean(body.marketingConsent, false),
+          marketingConsentSource: this.optionalString(body.marketingConsentSource),
+          marketingConsentCapturedAt: this.optionalBoolean(body.marketingConsent, false) ? new Date() : undefined,
         },
       });
+      await this.completeImportOnboarding(tenantId);
       await this.logActivity(tx, tenantId, actorUserId, 'contact_created', `Created contact ${contact.firstName} ${contact.lastName}`, { contactId: contact.id, companyId: contact.companyId });
       return contact;
     });
@@ -65,6 +108,9 @@ export class CrmService {
           status: this.optionalEnum(body.status, Object.values(ContactStatus)),
           source: this.optionalEnum(body.source, Object.values(ContactSource)),
           tags: Array.isArray(body.tags) ? this.stringArray(body.tags) : undefined,
+          marketingConsent: this.optionalBoolean(body.marketingConsent),
+          marketingConsentSource: this.optionalString(body.marketingConsentSource),
+          marketingConsentCapturedAt: body.marketingConsent === true || body.marketingConsent === 'true' ? new Date() : body.marketingConsent === false || body.marketingConsent === 'false' ? null : undefined,
           lastActivityAt: new Date(),
         },
       });
@@ -77,6 +123,101 @@ export class CrmService {
     await this.getContact(tenantId, id);
     await this.prisma.contact.delete({ where: { id } });
     return { success: true };
+  }
+
+  async previewContactImport(tenantId: string, body: Record<string, unknown>) {
+    const input = this.parseImportInput(body);
+    return this.buildImportPreview(tenantId, input.rows, input.mapping);
+  }
+
+  async importContacts(tenantId: string, actorUserId: string, body: Record<string, unknown>) {
+    const input = this.parseImportInput(body);
+    const preview = await this.buildImportPreview(tenantId, input.rows, input.mapping);
+    const validRows = preview.rows.filter((row) => row.valid).map((row) => row.normalized);
+    let created = 0;
+    let updated = 0;
+
+    for (const row of validRows) {
+      const companyId = row.companyName ? await this.ensureCompany(tenantId, actorUserId, row.companyName) : undefined;
+      const existing = await this.prisma.contact.findUnique({ where: { tenantId_email: { tenantId, email: row.email } } });
+      await this.prisma.contact.upsert({
+        where: { tenantId_email: { tenantId, email: row.email } },
+        create: {
+          tenantId,
+          firstName: row.firstName,
+          lastName: row.lastName,
+          email: row.email,
+          phone: row.phone,
+          jobTitle: row.jobTitle,
+          companyId,
+          status: row.status,
+          source: ContactSource.import,
+          tags: row.tags,
+          marketingConsent: row.marketingConsent,
+          marketingConsentSource: row.marketingConsentSource,
+          marketingConsentCapturedAt: row.marketingConsent ? new Date() : undefined,
+        },
+        update: {
+          firstName: row.provided.firstName ? row.firstName : undefined,
+          lastName: row.provided.lastName ? row.lastName : undefined,
+          phone: row.provided.phone ? row.phone : undefined,
+          jobTitle: row.provided.jobTitle ? row.jobTitle : undefined,
+          companyId,
+          status: row.provided.status ? row.status : undefined,
+          source: ContactSource.import,
+          tags: row.provided.tags ? row.tags : undefined,
+          marketingConsent: row.marketingConsent,
+          marketingConsentSource: row.marketingConsentSource,
+          marketingConsentCapturedAt: row.marketingConsent ? new Date() : undefined,
+          lastActivityAt: new Date(),
+        },
+      });
+      if (existing) updated++; else created++;
+    }
+
+    await this.completeImportOnboarding(tenantId);
+    await this.createActivity(tenantId, actorUserId, {
+      type: 'contacts_imported',
+      subject: `Imported ${validRows.length} contacts`,
+      createdBy: actorUserId,
+    });
+
+    return {
+      created,
+      updated,
+      skipped: preview.summary.invalid,
+      duplicates: preview.summary.duplicates,
+      totalRows: preview.summary.totalRows,
+      marketable: preview.summary.marketable,
+    };
+  }
+
+  async previewGoogleSheetsImport(tenantId: string, body: Record<string, unknown>) {
+    const rows = await this.fetchGoogleSheetRows(body);
+    const mapping = this.mapping(body.mapping);
+    return this.buildImportPreview(tenantId, rows, mapping);
+  }
+
+  async importGoogleSheetsContacts(tenantId: string, actorUserId: string, body: Record<string, unknown>) {
+    const rows = await this.fetchGoogleSheetRows(body);
+    return this.importContacts(tenantId, actorUserId, { rows, mapping: body.mapping });
+  }
+
+  async audiencePreview(tenantId: string, body: Record<string, unknown>) {
+    const filter = this.normalizeAudienceFilter(body.recipientFilter);
+    const contacts = await this.findMarketableContacts(tenantId, filter, 5000);
+    const suppressed = await this.prisma.suppressionEntry.findMany({
+      where: { tenantId, email: { in: contacts.map((contact) => contact.email.toLowerCase()) } },
+      select: { email: true },
+    });
+    const suppressedEmails = new Set(suppressed.map((item) => item.email.toLowerCase()));
+    const allowed = contacts.filter((contact) => !suppressedEmails.has(contact.email.toLowerCase()));
+    return {
+      total: contacts.length,
+      suppressed: contacts.length - allowed.length,
+      allowed: allowed.length,
+      sample: allowed.slice(0, 10),
+    };
   }
 
   listCompanies(tenantId: string, query: Record<string, string>) {
@@ -317,6 +458,215 @@ export class CrmService {
     return { success: true };
   }
 
+  private parseImportInput(body: Record<string, unknown>) {
+    const mapping = this.mapping(body.mapping);
+    const rows = Array.isArray(body.rows)
+      ? body.rows.filter((row): row is ImportRow => !!row && typeof row === 'object' && !Array.isArray(row))
+      : this.parseDelimitedText(this.requiredString(body.csvText, 'csvText'));
+    if (!rows.length) throw new BadRequestException('At least one contact row is required');
+    return { rows, mapping };
+  }
+
+  private async buildImportPreview(tenantId: string, rows: ImportRow[], mapping: ImportMapping) {
+    const emails = rows
+      .map((row) => this.normalizeImportRow(row, mapping, 0).email)
+      .filter(Boolean);
+    const existing = await this.prisma.contact.findMany({
+      where: { tenantId, email: { in: emails } },
+      select: { email: true },
+    });
+    const existingEmails = new Set(existing.map((contact) => contact.email.toLowerCase()));
+    const seenEmails = new Set<string>();
+    const previewRows = rows.map((row, index) => {
+      const normalized = this.normalizeImportRow(row, mapping, index + 2);
+      const errors: string[] = [];
+      if (!normalized.email) errors.push('Missing email');
+      if (normalized.email && !this.validEmail(normalized.email)) errors.push('Invalid email');
+      if (!normalized.marketingConsent) errors.push('Missing marketing consent');
+      const duplicateInFile = !!normalized.email && seenEmails.has(normalized.email);
+      if (duplicateInFile) errors.push('Duplicate in file');
+      if (normalized.email) seenEmails.add(normalized.email);
+      return {
+        rowNumber: normalized.rowNumber,
+        valid: errors.length === 0,
+        duplicate: duplicateInFile || existingEmails.has(normalized.email),
+        existing: existingEmails.has(normalized.email),
+        errors,
+        normalized,
+      };
+    });
+    return {
+      headers: Object.keys(rows[0] ?? {}),
+      rows: previewRows,
+      summary: {
+        totalRows: previewRows.length,
+        valid: previewRows.filter((row) => row.valid).length,
+        invalid: previewRows.filter((row) => !row.valid).length,
+        duplicates: previewRows.filter((row) => row.duplicate).length,
+        missingConsent: previewRows.filter((row) => row.errors.includes('Missing marketing consent')).length,
+        marketable: previewRows.filter((row) => row.valid && row.normalized.marketingConsent).length,
+      },
+    };
+  }
+
+  private normalizeImportRow(row: ImportRow, mapping: ImportMapping, rowNumber: number): NormalizedImportRow {
+    const get = (field: keyof ImportMapping) => this.cell(row, mapping[field]);
+    const fullName = this.cell(row, 'name') || this.cell(row, 'fullName') || '';
+    const [fallbackFirst, ...fallbackLast] = fullName.split(/\s+/).filter(Boolean);
+    const email = get('email').toLowerCase();
+    const consentSource = get('marketingConsentSource') || 'import';
+    const firstName = get('firstName');
+    const lastName = get('lastName');
+    const status = get('status');
+    const tags = get('tags');
+    return {
+      rowNumber,
+      firstName: firstName || fallbackFirst || 'Unknown',
+      lastName: lastName || fallbackLast.join(' ') || '-',
+      email,
+      phone: get('phone') || undefined,
+      jobTitle: get('jobTitle') || undefined,
+      companyName: get('company') || undefined,
+      status: this.contactStatus(status),
+      tags: this.splitTags(tags),
+      marketingConsent: this.truthy(get('marketingConsent')),
+      marketingConsentSource: consentSource,
+      provided: {
+        firstName: !!firstName || !!fallbackFirst,
+        lastName: !!lastName || fallbackLast.length > 0,
+        phone: !!get('phone'),
+        jobTitle: !!get('jobTitle'),
+        company: !!get('company'),
+        status: !!status,
+        tags: !!tags,
+      },
+    };
+  }
+
+  private mapping(value: unknown): ImportMapping {
+    const raw = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+    return {
+      firstName: this.stringOrDefault(raw.firstName, 'firstName'),
+      lastName: this.stringOrDefault(raw.lastName, 'lastName'),
+      email: this.stringOrDefault(raw.email, 'email'),
+      phone: this.stringOrDefault(raw.phone, 'phone'),
+      jobTitle: this.stringOrDefault(raw.jobTitle, 'jobTitle'),
+      company: this.stringOrDefault(raw.company, 'company'),
+      status: this.stringOrDefault(raw.status, 'status'),
+      tags: this.stringOrDefault(raw.tags, 'tags'),
+      marketingConsent: this.stringOrDefault(raw.marketingConsent, 'marketingConsent'),
+      marketingConsentSource: this.stringOrDefault(raw.marketingConsentSource, 'marketingConsentSource'),
+    };
+  }
+
+  private parseDelimitedText(text: string): ImportRow[] {
+    const delimiter = text.includes('\t') ? '\t' : ',';
+    const rows = this.parseRows(text, delimiter).filter((row) => row.some((cell) => cell.trim()));
+    const headers = rows.shift()?.map((cell) => this.normalizeHeader(cell)) ?? [];
+    if (!headers.length) return [];
+    return rows.map((cells) => Object.fromEntries(headers.map((header, index) => [header, cells[index] ?? ''])));
+  }
+
+  private parseRows(text: string, delimiter: string) {
+    const rows: string[][] = [];
+    let row: string[] = [];
+    let cell = '';
+    let quoted = false;
+    for (let index = 0; index < text.length; index++) {
+      const char = text[index];
+      const next = text[index + 1];
+      if (char === '"' && quoted && next === '"') {
+        cell += '"';
+        index++;
+      } else if (char === '"') {
+        quoted = !quoted;
+      } else if (char === delimiter && !quoted) {
+        row.push(cell.trim());
+        cell = '';
+      } else if ((char === '\n' || char === '\r') && !quoted) {
+        if (char === '\r' && next === '\n') index++;
+        row.push(cell.trim());
+        rows.push(row);
+        row = [];
+        cell = '';
+      } else {
+        cell += char;
+      }
+    }
+    row.push(cell.trim());
+    rows.push(row);
+    return rows;
+  }
+
+  private async fetchGoogleSheetRows(body: Record<string, unknown>) {
+    const spreadsheetId = this.extractSpreadsheetId(this.requiredString(body.sheetUrl, 'sheetUrl'));
+    const worksheet = this.optionalString(body.worksheet) ?? 'Sheet1';
+    const serviceEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
+    const privateKey = process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY?.replace(/\\n/g, '\n');
+    if (!serviceEmail || !privateKey) {
+      throw new BadRequestException('Google Sheets service account is not configured');
+    }
+    const auth = new google.auth.JWT({
+      email: serviceEmail,
+      key: privateKey,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+    });
+    const sheets = google.sheets({ version: 'v4', auth });
+    const result = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: worksheet,
+    });
+    const values = result.data.values ?? [];
+    if (!values.length) throw new BadRequestException('Google Sheet has no rows');
+    const headers = values[0].map((cell) => this.normalizeHeader(String(cell ?? '')));
+    return values.slice(1).map((cells) => Object.fromEntries(headers.map((header, index) => [header, String(cells[index] ?? '')])));
+  }
+
+  private extractSpreadsheetId(sheetUrl: string) {
+    const match = sheetUrl.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/) ?? sheetUrl.match(/^([a-zA-Z0-9-_]{20,})$/);
+    if (!match) throw new BadRequestException('Invalid Google Sheet URL');
+    return match[1];
+  }
+
+  private normalizeAudienceFilter(value: unknown) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return { mode: 'all' };
+    const raw = value as Record<string, unknown>;
+    return {
+      mode: raw.mode === 'manual' ? 'manual' : 'all',
+      contactIds: Array.isArray(raw.contactIds) ? raw.contactIds.filter((item): item is string => typeof item === 'string') : undefined,
+      statuses: Array.isArray(raw.statuses) ? raw.statuses.filter((item): item is string => typeof item === 'string') : undefined,
+      tags: Array.isArray(raw.tags) ? raw.tags.filter((item): item is string => typeof item === 'string') : undefined,
+      companyId: this.optionalString(raw.companyId),
+    };
+  }
+
+  private async findMarketableContacts(tenantId: string, filter: ReturnType<CrmService['normalizeAudienceFilter']>, take: number) {
+    const where: Prisma.ContactWhereInput = { tenantId, marketingConsent: true };
+    if (filter.mode === 'manual' && filter.contactIds?.length) where.id = { in: filter.contactIds };
+    const statuses = filter.statuses?.filter((status): status is ContactStatus => Object.values(ContactStatus).includes(status as ContactStatus));
+    if (statuses?.length) where.status = { in: statuses };
+    if (filter.tags?.length) where.tags = { hasSome: filter.tags };
+    if (filter.companyId) where.companyId = filter.companyId;
+    return this.prisma.contact.findMany({ where, orderBy: { createdAt: 'desc' }, take });
+  }
+
+  private async ensureCompany(tenantId: string, actorUserId: string, name: string) {
+    const existing = await this.prisma.company.findFirst({ where: { tenantId, name } });
+    if (existing) return existing.id;
+    const company = await this.prisma.company.create({
+      data: { tenantId, name, tags: [], assignedTo: actorUserId },
+    });
+    return company.id;
+  }
+
+  private completeImportOnboarding(tenantId: string) {
+    return this.prisma.onboardingItem.upsert({
+      where: { tenantId_key: { tenantId, key: 'import_crm_data' } },
+      create: { tenantId, key: 'import_crm_data', label: 'Import CRM data', completedAt: new Date() },
+      update: { completedAt: new Date() },
+    }).catch(() => undefined);
+  }
+
   private logActivity(tx: Prisma.TransactionClient, tenantId: string, actorUserId: string, type: string, subject: string, links: { contactId?: string; companyId?: string | null; dealId?: string }) {
     return tx.activity.create({
       data: {
@@ -361,5 +711,44 @@ export class CrmService {
 
   private stringArray(value: unknown) {
     return Array.isArray(value) ? value.map(String).filter(Boolean) : [];
+  }
+
+  private optionalBoolean(value: unknown, fallback?: boolean) {
+    if (value === undefined || value === null || value === '') return fallback;
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'string') return this.truthy(value);
+    return fallback;
+  }
+
+  private truthy(value: string) {
+    return ['true', 'yes', 'y', '1', 'opted in', 'opt-in', 'subscribed', 'consent'].includes(value.trim().toLowerCase());
+  }
+
+  private contactStatus(value: string) {
+    const normalized = value.trim().toLowerCase();
+    return Object.values(ContactStatus).includes(normalized as ContactStatus) ? normalized as ContactStatus : ContactStatus.customer;
+  }
+
+  private splitTags(value: string) {
+    return value.split(/[;,]/).map((tag) => tag.trim()).filter(Boolean);
+  }
+
+  private cell(row: ImportRow, key?: string) {
+    if (!key) return '';
+    const normalizedKey = this.normalizeHeader(key);
+    const match = Object.entries(row).find(([candidate]) => this.normalizeHeader(candidate) === normalizedKey);
+    return match ? String(match[1] ?? '').trim() : '';
+  }
+
+  private normalizeHeader(value: string) {
+    return value.trim().replace(/^\uFEFF/, '').replace(/[^a-zA-Z0-9]+(.)/g, (_m, chr: string) => chr.toUpperCase()).replace(/^[A-Z]/, (chr) => chr.toLowerCase());
+  }
+
+  private stringOrDefault(value: unknown, fallback: string) {
+    return typeof value === 'string' && value.trim() ? value.trim() : fallback;
+  }
+
+  private validEmail(value: string) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
   }
 }

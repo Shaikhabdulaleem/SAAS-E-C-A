@@ -13,7 +13,7 @@ export class ServiceAccessGuard implements CanActivate {
   ) {}
 
   async canActivate(context: ExecutionContext) {
-    const serviceKey = this.reflector.getAllAndOverride<string>(REQUIRED_SERVICE_KEY, [
+    const serviceKey = this.reflector.getAllAndOverride<string | string[]>(REQUIRED_SERVICE_KEY, [
       context.getHandler(),
       context.getClass(),
     ]);
@@ -36,17 +36,16 @@ export class ServiceAccessGuard implements CanActivate {
     }
     if (!tenantId) throw new ForbiddenException('Tenant service access is required');
 
-    const enabled = await this.prisma.tenantService.findUnique({
+    const serviceKeys = Array.isArray(serviceKey) ? serviceKey : [serviceKey];
+    const enabled = await this.prisma.tenantService.findFirst({
       where: {
-        tenantId_key: {
-          tenantId,
-          key: serviceKey,
-        },
+        tenantId,
+        key: { in: serviceKeys },
       },
       select: { id: true },
     });
 
-    if (!enabled) throw new ForbiddenException(`Service access denied: ${serviceKey}`);
+    if (!enabled) throw new ForbiddenException(`Service access denied: ${serviceKeys.join(' or ')}`);
 
     return true;
   }

@@ -18,7 +18,7 @@ export class TenantScopedController {
 }
 
 @Controller('contacts')
-@RequireService('crm')
+@RequireService(['crm', 'email_marketing'])
 @UseGuards(JwtAuthGuard, ServiceAccessGuard)
 export class ContactsController extends TenantScopedController {
   constructor(private readonly crm: CrmService) { super(); }
@@ -31,6 +31,31 @@ export class ContactsController extends TenantScopedController {
   @Post()
   create(@CurrentUser() user: AuthenticatedUser, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
     return this.crm.createContact(this.tenantId(user, selectedTenantId), user.id, body);
+  }
+
+  @Post('import/preview')
+  previewImport(@CurrentUser() user: AuthenticatedUser, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.crm.previewContactImport(this.tenantId(user, selectedTenantId), body);
+  }
+
+  @Post('import')
+  importContacts(@CurrentUser() user: AuthenticatedUser, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.crm.importContacts(this.tenantId(user, selectedTenantId), user.id, body);
+  }
+
+  @Post('google-sheets/preview')
+  previewGoogleSheets(@CurrentUser() user: AuthenticatedUser, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.crm.previewGoogleSheetsImport(this.tenantId(user, selectedTenantId), body);
+  }
+
+  @Post('google-sheets/import')
+  importGoogleSheets(@CurrentUser() user: AuthenticatedUser, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.crm.importGoogleSheetsContacts(this.tenantId(user, selectedTenantId), user.id, body);
+  }
+
+  @Post('audience/preview')
+  audiencePreview(@CurrentUser() user: AuthenticatedUser, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.crm.audiencePreview(this.tenantId(user, selectedTenantId), body);
   }
 
   @Get(':id')

@@ -29,6 +29,7 @@ import {
   Layers,
   Shield,
   Palette,
+  Ban,
 } from 'lucide-react';
 import { useState, type ComponentType } from 'react';
 import { Badge } from '../components/ui/badge';
@@ -97,7 +98,9 @@ function buildNavGroups(user: User | null, activeServices: string[] = [], isImpe
       label: 'Email Marketing',
       items: [
         { name: 'Campaigns', href: '/campaigns', icon: Mail },
+        { name: 'Audience Setup', href: '/audience-setup', icon: Users },
         { name: 'Templates', href: '/templates', icon: FileText },
+        { name: 'Suppressions', href: '/suppressions', icon: Ban },
       ],
     });
   }
@@ -315,6 +318,7 @@ export function MainLayout() {
     if (path.startsWith('/finance')) return 'Finance';
     if (path.startsWith('/campaigns')) return 'Campaigns';
     if (path.startsWith('/templates')) return 'Templates';
+    if (path.startsWith('/suppressions')) return 'Suppression List';
     if (path.startsWith('/cold-email/provider-connect')) return 'Connect Email Provider';
     if (path.startsWith('/cold-email/domain-manager')) return 'Domain Management';
     if (path.startsWith('/cold-email/provision')) return 'Auto-Provision';

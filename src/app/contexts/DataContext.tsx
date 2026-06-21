@@ -17,6 +17,9 @@ export interface Contact {
   status: 'lead' | 'prospect' | 'customer' | 'churned';
   source: 'manual' | 'import' | 'campaign' | 'api';
   tags: string[];
+  marketingConsent: boolean;
+  marketingConsentSource?: string;
+  marketingConsentCapturedAt?: string;
   createdAt: string;
   lastActivityAt: string;
 }
@@ -56,11 +59,21 @@ export interface Campaign {
   fromName: string;
   fromEmail: string;
   replyToEmail?: string;
+  body?: string;
   bodyPlainText?: string;
-  status: 'draft' | 'scheduled' | 'sending' | 'sent' | 'cancelled';
+  status: 'draft' | 'scheduled' | 'sending' | 'sent' | 'partial_failed' | 'cancelled';
   scheduledAt?: string;
   scheduledTz?: string;
   sentAt?: string;
+  completedAt?: string;
+  lastError?: string;
+  recipientFilter?: {
+    mode?: 'all' | 'manual';
+    contactIds?: string[];
+    statuses?: string[];
+    tags?: string[];
+    companyId?: string;
+  };
   totalRecipients: number;
   openCount: number;
   clickCount: number;
@@ -188,9 +201,12 @@ export function DataProvider({ children }: { children: ReactNode }) {
       let nextCampaigns: Campaign[] = [];
       let nextTemplates: EmailTemplate[] = [];
 
+      if (hasService('crm') || hasService('email_marketing')) {
+        nextContacts = await apiRequest<Contact[]>('/contacts');
+      }
+
       if (hasService('crm')) {
-        [nextContacts, nextCompanies, nextDeals, nextActivities] = await Promise.all([
-          apiRequest<Contact[]>('/contacts'),
+        [nextCompanies, nextDeals, nextActivities] = await Promise.all([
           apiRequest<Company[]>('/companies'),
           apiRequest<Deal[]>('/deals'),
           apiRequest<Activity[]>('/activities'),
@@ -300,57 +316,53 @@ export function DataProvider({ children }: { children: ReactNode }) {
   };
 
   const addCampaign = (campaign: Omit<Campaign, 'id' | 'createdAt'>) => {
-    const newCampaign: Campaign = {
-      ...campaign,
-      id: Date.now().toString(),
-      createdAt: new Date().toISOString().split('T')[0],
-    };
-    setCampaigns([...campaigns, newCampaign]);
-    if (getAccessToken()) void apiRequest<Campaign>('/email/campaigns', { method: 'POST', body: JSON.stringify(campaign) })
-      .then(c => { setCampaigns(prev => [...prev.filter(item => item.id !== newCampaign.id), normalizeCampaign(c)]); setApiError(null); })
+    if (getAccessToken()) void apiRequest<Campaign>('/email/campaigns', { method: 'POST', body: JSON.stringify({ ...campaign, status: 'draft' }) })
+      .then(c => {
+        if (campaign.status === 'scheduled' && campaign.scheduledAt) {
+          return apiRequest<Campaign>(`/email/campaigns/${c.id}/schedule`, {
+            method: 'POST',
+            body: JSON.stringify({ scheduledAt: campaign.scheduledAt }),
+          });
+        }
+        return c;
+      })
+      .then(c => { setCampaigns(prev => [normalizeCampaign(c), ...prev]); setApiError(null); })
       .catch(error => setApiError(error instanceof Error ? error.message : 'Unable to add campaign'));
   };
 
   const updateCampaign = (id: string, updates: Partial<Campaign>) => {
-    setCampaigns(campaigns.map(c => c.id === id ? { ...c, ...updates } : c));
     if (getAccessToken()) void apiRequest<Campaign>(`/email/campaigns/${id}`, { method: 'PATCH', body: JSON.stringify(updates) })
       .then(c => { setCampaigns(prev => prev.map(item => item.id === id ? normalizeCampaign(c) : item)); setApiError(null); })
       .catch(error => setApiError(error instanceof Error ? error.message : 'Unable to update campaign'));
   };
 
   const deleteCampaign = (id: string) => {
-    setCampaigns(campaigns.filter(c => c.id !== id));
     if (getAccessToken()) void apiRequest<{ success: boolean }>(`/email/campaigns/${id}`, { method: 'DELETE' })
-      .then(() => setApiError(null))
+      .then(() => { setCampaigns(prev => prev.filter(c => c.id !== id)); setApiError(null); })
       .catch(error => setApiError(error instanceof Error ? error.message : 'Unable to delete campaign'));
   };
 
   const sendCampaignNow = (id: string) => {
-    setCampaigns(prev => prev.map(c => c.id === id ? { ...c, status: 'sending' } : c));
     if (getAccessToken()) void apiRequest<Campaign>(`/email/campaigns/${id}/send-now`, { method: 'POST' })
       .then(c => { setCampaigns(prev => prev.map(item => item.id === id ? normalizeCampaign(c) : item)); setApiError(null); })
       .catch(error => setApiError(error instanceof Error ? error.message : 'Unable to send campaign'));
   };
 
   const addTemplate = (template: Omit<EmailTemplate, 'id' | 'createdAt'>) => {
-    const optimistic: EmailTemplate = { ...template, id: `tpl-${Date.now()}`, createdAt: new Date().toISOString().split('T')[0] };
-    setTemplates(prev => [optimistic, ...prev]);
     if (getAccessToken()) void apiRequest<EmailTemplate>('/email/templates', { method: 'POST', body: JSON.stringify(template) })
-      .then(t => { setTemplates(prev => [normalizeTemplate(t), ...prev.filter(item => item.id !== optimistic.id)]); setApiError(null); })
+      .then(t => { setTemplates(prev => [normalizeTemplate(t), ...prev]); setApiError(null); })
       .catch(error => setApiError(error instanceof Error ? error.message : 'Unable to add template'));
   };
 
   const updateTemplate = (id: string, updates: Partial<EmailTemplate>) => {
-    setTemplates(prev => prev.map(t => t.id === id ? { ...t, ...updates } : t));
     if (getAccessToken()) void apiRequest<EmailTemplate>(`/email/templates/${id}`, { method: 'PATCH', body: JSON.stringify(updates) })
       .then(t => { setTemplates(prev => prev.map(item => item.id === id ? normalizeTemplate(t) : item)); setApiError(null); })
       .catch(error => setApiError(error instanceof Error ? error.message : 'Unable to update template'));
   };
 
   const deleteTemplate = (id: string) => {
-    setTemplates(prev => prev.filter(t => t.id !== id));
     if (getAccessToken()) void apiRequest<{ success: boolean }>(`/email/templates/${id}`, { method: 'DELETE' })
-      .then(() => setApiError(null))
+      .then(() => { setTemplates(prev => prev.filter(t => t.id !== id)); setApiError(null); })
       .catch(error => setApiError(error instanceof Error ? error.message : 'Unable to delete template'));
   };
 
@@ -423,7 +435,12 @@ export function DataProvider({ children }: { children: ReactNode }) {
 }
 
 function normalizeContact(contact: Contact): Contact {
-  return { ...contact, createdAt: String(contact.createdAt).split('T')[0], lastActivityAt: String(contact.lastActivityAt).split('T')[0] };
+  return {
+    ...contact,
+    marketingConsent: contact.marketingConsent ?? false,
+    createdAt: String(contact.createdAt).split('T')[0],
+    lastActivityAt: String(contact.lastActivityAt).split('T')[0],
+  };
 }
 
 function normalizeCompany(company: Company): Company {
@@ -449,6 +466,7 @@ function normalizeCampaign(campaign: Campaign): Campaign {
     createdAt: String(campaign.createdAt).split('T')[0],
     scheduledAt: campaign.scheduledAt ? String(campaign.scheduledAt) : undefined,
     sentAt: campaign.sentAt ? String(campaign.sentAt) : undefined,
+    completedAt: campaign.completedAt ? String(campaign.completedAt) : undefined,
   };
 }
 

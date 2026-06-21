@@ -53,6 +53,7 @@ enum CampaignStatus {
   scheduled
   sending
   sent
+  partial_failed
   cancelled
 }
 
@@ -424,6 +425,9 @@ model Contact {
   status         ContactStatus @default(lead)
   source         ContactSource @default(manual)
   tags           String[]      @default([])
+  marketingConsent Boolean     @default(false)
+  marketingConsentSource String?
+  marketingConsentCapturedAt DateTime?
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
   lastActivityAt DateTime      @default(now())
@@ -560,6 +564,11 @@ model EmailCampaign {
   scheduledAt     DateTime?
   scheduledTz     String?
   sentAt          DateTime?
+  cancelledAt     DateTime?
+  completedAt     DateTime?
+  lastError       String?
+  sendJobId       String?
+  recipientFilter Json?
   totalRecipients Int              @default(0)
   openCount       Int              @default(0)
   clickCount      Int              @default(0)
@@ -588,17 +597,26 @@ model EmailCampaign {
 }
 
 model CampaignRecipient {
-  id          String        @id @default(uuid())
-  campaignId  String
-  contactId   String?
-  email       String
-  firstName   String?
-  lastName    String?
-  status      String        @default("queued")
-  sentAt      DateTime?
-  campaign    EmailCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  id                String        @id @default(uuid())
+  campaignId        String
+  contactId         String?
+  email             String
+  firstName         String?
+  lastName          String?
+  status            String        @default("queued")
+  attempts          Int           @default(0)
+  providerRequestId String?
+  sentAt            DateTime?
+  failedAt          DateTime?
+  openedAt          DateTime?
+  clickedAt         DateTime?
+  bouncedAt         DateTime?
+  unsubscribedAt    DateTime?
+  lastError         String?
+  campaign          EmailCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 
   @@index([campaignId])
+  @@index([campaignId, status])
 }
 
 model EmailEvent {
@@ -608,11 +626,13 @@ model EmailEvent {
   type        EmailEventType
   url         String?
   providerId  String?
+  eventKey    String?
   occurredAt  DateTime       @default(now())
   campaign    EmailCampaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 
   @@index([campaignId, type])
   @@unique([providerId])
+  @@unique([eventKey])
 }
 
 model BillingSubscription {

@@ -1,13 +1,56 @@
+import { useEffect, useState } from 'react';
 import { useParams, Link, useNavigate } from 'react-router';
 import { useData } from '../../contexts/DataContext';
-import { ArrowLeft, Mail, Eye, MousePointerClick, Users, Calendar } from 'lucide-react';
+import { ArrowLeft, Mail, Eye, MousePointerClick, Users, Calendar, AlertCircle } from 'lucide-react';
+import { apiRequest } from '../../lib/api';
+
+type Recipient = {
+  id: string;
+  email: string;
+  firstName?: string;
+  lastName?: string;
+  status: string;
+  attempts: number;
+  sentAt?: string;
+  lastError?: string;
+};
+
+type CampaignAnalytics = {
+  totalRecipients: number;
+  sent: number;
+  failed: number;
+  queued: number;
+  openCount: number;
+  clickCount: number;
+  bounceCount: number;
+  unsubCount: number;
+  openRate: number;
+  clickRate: number;
+};
 
 export function CampaignDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { campaigns, addCampaign, updateCampaign, deleteCampaign, sendCampaignNow } = useData();
+  const { campaigns, addCampaign, deleteCampaign, sendCampaignNow, refreshData } = useData();
+  const [recipients, setRecipients] = useState<Recipient[]>([]);
+  const [analytics, setAnalytics] = useState<CampaignAnalytics | null>(null);
+  const [error, setError] = useState('');
   
   const campaign = campaigns.find(c => c.id === id);
+
+  useEffect(() => {
+    if (!id) return;
+    Promise.all([
+      apiRequest<Recipient[]>(`/email/campaigns/${id}/recipients`),
+      apiRequest<CampaignAnalytics>(`/email/campaigns/${id}/analytics`),
+    ])
+      .then(([recipientData, analyticsData]) => {
+        setRecipients(recipientData);
+        setAnalytics(analyticsData);
+        setError('');
+      })
+      .catch(err => setError(err instanceof Error ? err.message : 'Unable to load campaign report'));
+  }, [id, campaign?.status, campaign?.openCount, campaign?.clickCount]);
 
   if (!campaign) {
     return <div>Campaign not found</div>;
@@ -28,6 +71,7 @@ export function CampaignDetail() {
     scheduled: 'bg-blue-100 text-blue-800',
     sending: 'bg-yellow-100 text-yellow-800',
     sent: 'bg-green-100 text-green-800',
+    partial_failed: 'bg-orange-100 text-orange-800',
     cancelled: 'bg-red-100 text-red-800',
   };
 
@@ -37,6 +81,9 @@ export function CampaignDetail() {
       subject: campaign.subject,
       fromName: campaign.fromName,
       fromEmail: campaign.fromEmail,
+      replyToEmail: campaign.replyToEmail,
+      body: campaign.body,
+      bodyPlainText: campaign.bodyPlainText,
       status: 'draft',
       totalRecipients: 0,
       openCount: 0,
@@ -47,6 +94,8 @@ export function CampaignDetail() {
       trackClicks: true,
       gdprConsent: false,
       doubleOptIn: false,
+      companyAddress: campaign.companyAddress,
+      recipientFilter: campaign.recipientFilter,
     });
   };
 
@@ -130,6 +179,13 @@ export function CampaignDetail() {
                 </div>
               </div>
             )}
+
+            {campaign.status === 'partial_failed' && (
+              <div className="p-4 border-t border-orange-100 bg-orange-50 text-sm text-orange-800 flex gap-2">
+                <AlertCircle className="h-4 w-4 mt-0.5" />
+                <span>{campaign.lastError || 'Some recipients failed. Review the recipient table below.'}</span>
+              </div>
+            )}
           </div>
 
           {/* Email Preview */}
@@ -144,21 +200,12 @@ export function CampaignDetail() {
                     <p className="text-sm text-gray-500 mb-1">Subject:</p>
                     <p className="font-semibold text-gray-900">{campaign.subject}</p>
                   </div>
-                  <div className="prose max-w-none">
-                    <p className="text-gray-700 mb-4">
-                      Hi there,
-                    </p>
-                    <p className="text-gray-700 mb-4">
-                      We're excited to share some amazing updates with you!
-                    </p>
-                    <p className="text-gray-700 mb-4">
-                      [Email content would be displayed here with full HTML rendering]
-                    </p>
-                    <div className="mt-6">
-                <button onClick={() => window.open(`/campaigns/${campaign.id}`, '_blank')} className="px-6 py-3 bg-blue-600 text-white rounded-lg">
-                        Learn More
-                      </button>
-                    </div>
+                  <div className="prose max-w-none text-gray-700">
+                    {campaign.body ? (
+                      <div dangerouslySetInnerHTML={{ __html: campaign.body }} />
+                    ) : (
+                      <p>No campaign body has been saved yet.</p>
+                    )}
                     <div className="mt-8 pt-6 border-t border-gray-200 text-xs text-gray-500">
                       <p>You're receiving this email because you subscribed to {campaign.fromName}.</p>
                       <p className="mt-2">
@@ -169,6 +216,40 @@ export function CampaignDetail() {
                   </div>
                 </div>
               </div>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-lg shadow">
+            <div className="p-6 border-b border-gray-200">
+              <h2 className="text-lg font-semibold text-gray-900">Recipients</h2>
+              {error && <p className="text-sm text-red-600 mt-1">{error}</p>}
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50 text-gray-500">
+                  <tr>
+                    <th className="text-left px-6 py-3">Email</th>
+                    <th className="text-left px-6 py-3">Status</th>
+                    <th className="text-left px-6 py-3">Attempts</th>
+                    <th className="text-left px-6 py-3">Sent</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {recipients.map(recipient => (
+                    <tr key={recipient.id} className="border-t border-gray-100">
+                      <td className="px-6 py-3">{recipient.email}</td>
+                      <td className="px-6 py-3 capitalize">{recipient.status.replace(/_/g, ' ')}</td>
+                      <td className="px-6 py-3">{recipient.attempts}</td>
+                      <td className="px-6 py-3">{recipient.sentAt ? new Date(recipient.sentAt).toLocaleString() : recipient.lastError || '-'}</td>
+                    </tr>
+                  ))}
+                  {!recipients.length && (
+                    <tr>
+                      <td colSpan={4} className="px-6 py-8 text-center text-gray-500">No recipients queued yet.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
             </div>
           </div>
         </div>
@@ -183,6 +264,18 @@ export function CampaignDetail() {
                 <p className="text-sm text-gray-500">Status</p>
                 <p className="text-gray-900 font-medium capitalize">{campaign.status}</p>
               </div>
+              {analytics && (
+                <>
+                  <div>
+                    <p className="text-sm text-gray-500">Delivered</p>
+                    <p className="text-gray-900">{analytics.sent} / {analytics.totalRecipients}</p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-gray-500">Failed</p>
+                    <p className="text-gray-900">{analytics.failed}</p>
+                  </div>
+                </>
+              )}
               <div>
                 <p className="text-sm text-gray-500">Created</p>
                 <p className="text-gray-900">{new Date(campaign.createdAt).toLocaleDateString()}</p>
@@ -210,10 +303,12 @@ export function CampaignDetail() {
                 <button onClick={() => sendCampaignNow(campaign.id)} className="w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
                   Send Now
                 </button>
-                <button onClick={() => updateCampaign(campaign.id, {
-                  status: 'scheduled',
-                  scheduledAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-                })} className="w-full px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50">
+                <button onClick={() => {
+                  apiRequest(`/email/campaigns/${campaign.id}/schedule`, {
+                    method: 'POST',
+                    body: JSON.stringify({ scheduledAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() }),
+                  }).then(() => refreshData()).catch(err => setError(err instanceof Error ? err.message : 'Unable to schedule campaign'));
+                }} className="w-full px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50">
                   Schedule
                 </button>
                 <button onClick={duplicateCampaign} className="w-full px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50">
