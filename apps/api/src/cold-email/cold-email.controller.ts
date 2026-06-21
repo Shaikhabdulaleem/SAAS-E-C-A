@@ -239,3 +239,42 @@ export class ColdEmailWebhookController {
     return this.coldEmail.handleSendGridWebhook(body);
   }
 }
+
+// ── Email Finder ──
+
+@Controller('cold-email/email-finder')
+@RequireService('cold_email')
+@UseGuards(JwtAuthGuard, ServiceAccessGuard)
+export class EmailFinderController {
+  constructor(private readonly coldEmail: ColdEmailService) {}
+
+  @Get('credential')
+  getCredential(@CurrentUser() user: AuthenticatedUser, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.coldEmail.getEmailFinderCredential(tenantId(user, selectedTenantId));
+  }
+
+  @Post('credential')
+  saveCredential(@CurrentUser() user: AuthenticatedUser, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.coldEmail.saveEmailFinderCredential(tenantId(user, selectedTenantId), body);
+  }
+
+  @Delete('credential')
+  deleteCredential(@CurrentUser() user: AuthenticatedUser, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.coldEmail.deleteEmailFinderCredential(tenantId(user, selectedTenantId));
+  }
+
+  @Post('search')
+  search(@CurrentUser() user: AuthenticatedUser, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.coldEmail.searchEmailFinder(tenantId(user, selectedTenantId), body);
+  }
+
+  @Post('save-to-list')
+  saveToList(@CurrentUser() user: AuthenticatedUser, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.coldEmail.saveEmailFinderResultsToProspectList(tenantId(user, selectedTenantId), user.id, body);
+  }
+
+  @Post('save-to-crm')
+  saveToCrm(@CurrentUser() user: AuthenticatedUser, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.coldEmail.saveEmailFinderResultsToCrm(tenantId(user, selectedTenantId), user.id, body);
+  }
+}

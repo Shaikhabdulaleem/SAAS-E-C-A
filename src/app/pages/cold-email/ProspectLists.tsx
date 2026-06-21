@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
-import { Plus, Users, MoreHorizontal, X, List, CheckCircle, AlertCircle, AlertTriangle, ArrowLeft, Upload, Trash2, Download } from 'lucide-react';
+import { Link } from 'react-router';
+import { Plus, Users, MoreHorizontal, X, List, CheckCircle, AlertCircle, AlertTriangle, ArrowLeft, Upload, Trash2, Download, Search } from 'lucide-react';
 import { Card, CardContent } from '../../components/ui/card';
 import { Button } from '../../components/ui/button';
 import { Badge } from '../../components/ui/badge';
@@ -312,10 +313,15 @@ export function ProspectLists() {
           <h1 className="text-foreground">Prospect Lists</h1>
           <p className="text-sm text-muted-foreground mt-0.5">Manage your prospect lists for cold outreach</p>
         </div>
-        <Button size="sm" onClick={() => setShowCreateModal(true)}>
-          <Plus className="h-4 w-4 mr-1.5" />
-          Create List
-        </Button>
+        <div className="flex gap-2">
+          <Button size="sm" variant="outline" asChild>
+            <Link to="/cold-email/email-finder"><Search className="h-4 w-4 mr-1.5" />Find Emails</Link>
+          </Button>
+          <Button size="sm" onClick={() => setShowCreateModal(true)}>
+            <Plus className="h-4 w-4 mr-1.5" />
+            Create List
+          </Button>
+        </div>
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">

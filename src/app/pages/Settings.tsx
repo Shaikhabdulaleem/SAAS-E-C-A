@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { User, Building2, Bell, Lock, CreditCard, Users, Mail } from 'lucide-react';
+import { User, Building2, Bell, Lock, CreditCard, Users, Mail, Puzzle } from 'lucide-react';
+import { apiRequest } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
 import { useTenants } from '../contexts/TenantContext';
 
@@ -45,6 +46,7 @@ export function Settings() {
     { id: 'security', name: 'Security', icon: Lock },
     { id: 'billing', name: 'Billing', icon: CreditCard },
     { id: 'email', name: 'Email Settings', icon: Mail },
+    { id: 'integrations', name: 'Integrations', icon: Puzzle },
   ];
 
   return (
@@ -486,7 +488,99 @@ export function Settings() {
               </div>
             </div>
           )}
+
+          {activeTab === 'integrations' && (
+            <IntegrationsTab />
+          )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function IntegrationsTab() {
+  const [apiKey, setApiKey] = useState('');
+  const [credential, setCredential] = useState<{ maskedKey: string; isActive: boolean; connectedAt: string } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+
+  useEffect(() => {
+    apiRequest<any>('/cold-email/email-finder/credential')
+      .then(data => { if (data) setCredential(data); })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  const handleConnect = async () => {
+    if (!apiKey.trim()) return;
+    setSaving(true);
+    try {
+      await apiRequest('/cold-email/email-finder/credential', { method: 'POST', body: JSON.stringify({ apiKey: apiKey.trim(), providerType: 'apollo' }) });
+      const data = await apiRequest<any>('/cold-email/email-finder/credential');
+      setCredential(data);
+      setApiKey('');
+      setMessage('Apollo.io connected successfully');
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : 'Failed to connect');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDisconnect = async () => {
+    if (!window.confirm('Disconnect Apollo.io? You will need to re-enter your API key.')) return;
+    try {
+      await apiRequest('/cold-email/email-finder/credential', { method: 'DELETE' });
+      setCredential(null);
+      setMessage('Disconnected');
+    } catch {}
+  };
+
+  if (loading) return <p className="text-sm text-gray-500 py-8 text-center">Loading...</p>;
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-lg font-semibold text-gray-900">Integrations</h2>
+        <p className="text-sm text-gray-500">Connect external services for email finding and enrichment.</p>
+      </div>
+      <div className="bg-white rounded-xl border border-gray-200 p-6 space-y-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 rounded-xl bg-indigo-50">
+              <Puzzle className="h-5 w-5 text-indigo-600" />
+            </div>
+            <div>
+              <h3 className="font-medium text-gray-900">Apollo.io</h3>
+              <p className="text-xs text-gray-500">Find prospect emails by company, domain, or job title</p>
+            </div>
+          </div>
+          {credential ? (
+            <span className="px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700">Connected</span>
+          ) : (
+            <span className="px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-500">Not Connected</span>
+          )}
+        </div>
+        {credential ? (
+          <div className="space-y-3">
+            <div className="flex items-center justify-between px-4 py-3 bg-gray-50 rounded-lg">
+              <div>
+                <p className="text-sm text-gray-900">API Key: <span className="font-mono text-gray-500">{credential.maskedKey}</span></p>
+                <p className="text-xs text-gray-500">Connected {new Date(credential.connectedAt).toLocaleDateString()}</p>
+              </div>
+              <button onClick={() => void handleDisconnect()} className="text-xs text-red-600 hover:underline">Disconnect</button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex gap-2">
+            <input type="password" placeholder="Enter Apollo.io API Key" value={apiKey} onChange={e => setApiKey(e.target.value)} className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            <button onClick={() => void handleConnect()} disabled={saving || !apiKey.trim()} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm">
+              {saving ? 'Connecting...' : 'Connect'}
+            </button>
+          </div>
+        )}
+        {message && <p className={`text-xs ${message.includes('Failed') ? 'text-red-600' : 'text-emerald-600'}`}>{message}</p>}
       </div>
     </div>
   );

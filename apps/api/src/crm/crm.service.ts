@@ -125,6 +125,60 @@ export class CrmService {
     return { success: true };
   }
 
+  async sendContactsToColdOutreach(tenantId: string, actorUserId: string, body: Record<string, unknown>) {
+    const contactIds = Array.isArray(body.contactIds) ? body.contactIds.filter((id): id is string => typeof id === 'string') : [];
+    if (contactIds.length === 0) throw new BadRequestException('contactIds is required');
+
+    const listId = typeof body.listId === 'string' && body.listId.trim() ? body.listId.trim() : undefined;
+    const newListName = typeof body.newListName === 'string' && body.newListName.trim() ? body.newListName.trim() : undefined;
+    if (!listId && !newListName) throw new BadRequestException('Either listId or newListName is required');
+
+    const contacts = await this.prisma.contact.findMany({
+      where: { tenantId, id: { in: contactIds } },
+      include: { company: true },
+    });
+    if (contacts.length === 0) throw new BadRequestException('No valid contacts found');
+
+    let targetListId = listId;
+    if (!targetListId && newListName) {
+      const newList = await this.prisma.coldProspectList.create({
+        data: { tenantId, name: newListName, createdBy: actorUserId },
+      });
+      targetListId = newList.id;
+    }
+
+    const existingEmails = new Set(
+      (await this.prisma.coldProspect.findMany({
+        where: { listId: targetListId! },
+        select: { email: true },
+      })).map((p) => p.email.toLowerCase()),
+    );
+
+    const toCreate = contacts
+      .filter((c) => c.email && !existingEmails.has(c.email.toLowerCase()))
+      .map((c) => ({
+        listId: targetListId!,
+        contactId: c.id,
+        email: c.email,
+        firstName: c.firstName,
+        lastName: c.lastName,
+        companyName: c.company?.name ?? undefined,
+        jobTitle: c.jobTitle ?? undefined,
+      }));
+
+    if (toCreate.length > 0) {
+      await this.prisma.coldProspect.createMany({ data: toCreate as any, skipDuplicates: true });
+    }
+
+    const totalCount = await this.prisma.coldProspect.count({ where: { listId: targetListId! } });
+    await this.prisma.coldProspectList.update({
+      where: { id: targetListId! },
+      data: { totalCount },
+    });
+
+    return { created: toCreate.length, skipped: contacts.length - toCreate.length, listId: targetListId, totalCount };
+  }
+
   async previewContactImport(tenantId: string, body: Record<string, unknown>) {
     const input = this.parseImportInput(body);
     return this.buildImportPreview(tenantId, input.rows, input.mapping);

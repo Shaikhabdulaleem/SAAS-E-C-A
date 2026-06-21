@@ -8,8 +8,10 @@ import {
   ColdCampaignController,
   ColdSendEngineController,
   ColdEmailWebhookController,
+  EmailFinderController,
 } from './cold-email.controller';
 import { ColdEmailService } from './cold-email.service';
+import { EncryptionService } from '../tenants/encryption.service';
 
 @Module({
   imports: [AuthModule, ProvidersModule],
@@ -20,7 +22,8 @@ import { ColdEmailService } from './cold-email.service';
     ColdCampaignController,
     ColdSendEngineController,
     ColdEmailWebhookController,
+    EmailFinderController,
   ],
-  providers: [ColdEmailService],
+  providers: [ColdEmailService, EncryptionService],
 })
 export class ColdEmailModule {}

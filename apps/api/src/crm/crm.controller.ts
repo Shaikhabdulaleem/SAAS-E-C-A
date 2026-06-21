@@ -58,6 +58,11 @@ export class ContactsController extends TenantScopedController {
     return this.crm.audiencePreview(this.tenantId(user, selectedTenantId), body);
   }
 
+  @Post('send-to-cold-outreach')
+  sendToColdOutreach(@CurrentUser() user: AuthenticatedUser, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.crm.sendContactsToColdOutreach(this.tenantId(user, selectedTenantId), user.id, body);
+  }
+
   @Get(':id')
   get(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Headers('x-tenant-id') selectedTenantId?: string) {
     return this.crm.getContact(this.tenantId(user, selectedTenantId), id);

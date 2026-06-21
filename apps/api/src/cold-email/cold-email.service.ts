@@ -12,6 +12,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { DnsProviderService } from '../providers/services/dns-provider.service';
 import { JobsService } from '../providers/services/jobs.service';
 import { EmailDeliveryService } from '../providers/services/email-delivery.service';
+import { EncryptionService } from '../tenants/encryption.service';
 
 @Injectable()
 export class ColdEmailService {
@@ -20,6 +21,7 @@ export class ColdEmailService {
     private readonly dnsProvider: DnsProviderService,
     private readonly jobs: JobsService,
     private readonly emailDelivery: EmailDeliveryService,
+    private readonly encryption: EncryptionService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -1005,5 +1007,153 @@ export class ColdEmailService {
         await this.prisma.coldProspect.updateMany({ where: { id: { in: ids } }, data: { validationStatus: 'invalid' } });
       }
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Email Finder — Credential Management
+  // ---------------------------------------------------------------------------
+
+  async saveEmailFinderCredential(tenantId: string, body: Record<string, unknown>) {
+    const apiKey = this.requiredString(body.apiKey, 'apiKey');
+    const providerType = typeof body.providerType === 'string' ? body.providerType : 'apollo';
+    const encrypted = this.encryption.encrypt(apiKey);
+    const credential = await this.prisma.emailFinderCredential.upsert({
+      where: { tenantId_providerType: { tenantId, providerType } },
+      update: { apiKeyCipher: encrypted, isActive: true, connectedAt: new Date() },
+      create: { tenantId, providerType, apiKeyCipher: encrypted, isActive: true },
+    });
+    return { id: credential.id, providerType, isActive: true, connectedAt: credential.connectedAt };
+  }
+
+  async getEmailFinderCredential(tenantId: string) {
+    const credential = await this.prisma.emailFinderCredential.findFirst({ where: { tenantId } });
+    if (!credential) return null;
+    return {
+      id: credential.id,
+      providerType: credential.providerType,
+      isActive: credential.isActive,
+      connectedAt: credential.connectedAt,
+      lastUsedAt: credential.lastUsedAt,
+      maskedKey: '****' + this.encryption.decrypt(credential.apiKeyCipher).slice(-4),
+    };
+  }
+
+  async deleteEmailFinderCredential(tenantId: string) {
+    await this.prisma.emailFinderCredential.deleteMany({ where: { tenantId } });
+    return { success: true };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Email Finder — Apollo.io Search
+  // ---------------------------------------------------------------------------
+
+  async searchEmailFinder(tenantId: string, body: Record<string, unknown>) {
+    const credential = await this.prisma.emailFinderCredential.findFirst({ where: { tenantId, isActive: true } });
+    if (!credential) throw new BadRequestException('No email finder API key configured. Go to Settings > Integrations to add one.');
+    const apiKey = this.encryption.decrypt(credential.apiKeyCipher);
+
+    const titles = typeof body.titles === 'string' ? body.titles.split(',').map((t: string) => t.trim()).filter(Boolean) : Array.isArray(body.titles) ? body.titles : [];
+    const domain = this.optionalString(body.domain);
+    const companyName = this.optionalString(body.companyName);
+    const locations = typeof body.locations === 'string' ? body.locations.split(',').map((l: string) => l.trim()).filter(Boolean) : Array.isArray(body.locations) ? body.locations : [];
+    const perPage = this.optionalNumber(body.perPage, 25) ?? 25;
+
+    const searchBody: Record<string, unknown> = { per_page: Math.min(perPage, 100) };
+    if (titles.length > 0) searchBody.person_titles = titles;
+    if (domain) searchBody.q_organization_domains = domain;
+    if (companyName) searchBody.q_organization_name = companyName;
+    if (locations.length > 0) searchBody.person_locations = locations;
+
+    try {
+      const response = await fetch('https://api.apollo.io/api/v1/mixed_people/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
+        body: JSON.stringify(searchBody),
+      });
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new BadRequestException(`Apollo API error: ${response.status} ${errorText.slice(0, 200)}`);
+      }
+      const data = await response.json();
+      await this.prisma.emailFinderCredential.update({ where: { id: credential.id }, data: { lastUsedAt: new Date() } });
+      await this.prisma.providerLog.create({
+        data: { tenantId, provider: 'apollo', operation: 'people_search', status: 'success', request: searchBody as any, response: { count: data.people?.length ?? 0 } },
+      }).catch(() => undefined);
+
+      const results = (data.people ?? []).map((p: any) => ({
+        firstName: p.first_name ?? '',
+        lastName: p.last_name ?? '',
+        email: p.email ?? null,
+        title: p.title ?? '',
+        companyName: p.organization?.name ?? '',
+        emailStatus: p.email_status ?? 'unavailable',
+        linkedinUrl: p.linkedin_url ?? null,
+        city: p.city ?? null,
+        country: p.country ?? null,
+      }));
+
+      return { results, totalCount: data.pagination?.total_entries ?? results.length };
+    } catch (error) {
+      if (error instanceof BadRequestException) throw error;
+      await this.prisma.providerLog.create({
+        data: { tenantId, provider: 'apollo', operation: 'people_search', status: 'failed', request: searchBody as any, error: error instanceof Error ? error.message : String(error) },
+      }).catch(() => undefined);
+      throw new BadRequestException(`Email finder search failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Email Finder — Save Results
+  // ---------------------------------------------------------------------------
+
+  async saveEmailFinderResultsToProspectList(tenantId: string, userId: string, body: Record<string, unknown>) {
+    const prospects = Array.isArray(body.prospects) ? body.prospects : [];
+    if (prospects.length === 0) throw new BadRequestException('No prospects to save');
+
+    let listId = this.optionalString(body.listId);
+    const newListName = this.optionalString(body.newListName);
+    if (!listId && newListName) {
+      const newList = await this.prisma.coldProspectList.create({ data: { tenantId, name: newListName, createdBy: userId } });
+      listId = newList.id;
+    }
+    if (!listId) throw new BadRequestException('Either listId or newListName is required');
+
+    return this.bulkAddProspects(tenantId, listId, { prospects });
+  }
+
+  async saveEmailFinderResultsToCrm(tenantId: string, userId: string, body: Record<string, unknown>) {
+    const prospects = Array.isArray(body.prospects) ? body.prospects : [];
+    if (prospects.length === 0) throw new BadRequestException('No prospects to save');
+    let created = 0;
+    let skipped = 0;
+
+    for (const p of prospects) {
+      const email = typeof p.email === 'string' ? p.email.trim() : '';
+      if (!email) { skipped++; continue; }
+      const firstName = typeof p.firstName === 'string' ? p.firstName.trim() : 'Unknown';
+      const lastName = typeof p.lastName === 'string' ? p.lastName.trim() : '';
+      const companyName = typeof p.companyName === 'string' ? p.companyName.trim() : undefined;
+      const jobTitle = typeof p.title === 'string' ? p.title.trim() : typeof p.jobTitle === 'string' ? p.jobTitle.trim() : undefined;
+
+      const existing = await this.prisma.contact.findFirst({ where: { tenantId, email } });
+      if (existing) { skipped++; continue; }
+
+      let companyId: string | undefined;
+      if (companyName) {
+        const company = await this.prisma.company.upsert({
+          where: { tenantId_name: { tenantId, name: companyName } },
+          update: {},
+          create: { tenantId, name: companyName },
+        });
+        companyId = company.id;
+      }
+
+      await this.prisma.contact.create({
+        data: { tenantId, email, firstName, lastName, jobTitle, companyId, source: 'api' },
+      });
+      created++;
+    }
+
+    return { created, skipped };
   }
 }

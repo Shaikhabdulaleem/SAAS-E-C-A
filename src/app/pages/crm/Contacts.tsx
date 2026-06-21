@@ -1,7 +1,9 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useData } from '../../contexts/DataContext';
 import { Link } from 'react-router';
-import { Search, Plus, Mail, Phone, Building2, Tag, SlidersHorizontal, ChevronDown, MoreHorizontal, Users, X } from 'lucide-react';
+import { Search, Plus, Mail, Phone, Building2, Tag, SlidersHorizontal, ChevronDown, MoreHorizontal, Users, X, Send } from 'lucide-react';
+import { apiRequest } from '../../lib/api';
+import { Checkbox } from '../../components/ui/checkbox';
 import { Card, CardContent, CardHeader } from '../../components/ui/card';
 import { Button } from '../../components/ui/button';
 import { Badge } from '../../components/ui/badge';
@@ -50,6 +52,48 @@ export function Contacts() {
     marketingConsentSource: '',
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [showColdOutreachModal, setShowColdOutreachModal] = useState(false);
+  const [prospectLists, setProspectLists] = useState<Array<{ id: string; name: string }>>([]);
+  const [outreachMode, setOutreachMode] = useState<'existing' | 'new'>('existing');
+  const [selectedListId, setSelectedListId] = useState('');
+  const [newListName, setNewListName] = useState('');
+  const [outreachMessage, setOutreachMessage] = useState('');
+  const [outreachSending, setOutreachSending] = useState(false);
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds(prev => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+  };
+  const toggleSelectAll = () => {
+    if (selectedIds.size === filteredContacts.length) setSelectedIds(new Set());
+    else setSelectedIds(new Set(filteredContacts.map(c => c.id)));
+  };
+
+  const handleSendToColdOutreach = async () => {
+    setOutreachSending(true);
+    setOutreachMessage('');
+    try {
+      const body: Record<string, unknown> = { contactIds: [...selectedIds] };
+      if (outreachMode === 'existing' && selectedListId) body.listId = selectedListId;
+      if (outreachMode === 'new' && newListName.trim()) body.newListName = newListName.trim();
+      const result = await apiRequest<{ created: number; skipped: number }>('/contacts/send-to-cold-outreach', { method: 'POST', body: JSON.stringify(body) });
+      setOutreachMessage(`${result.created} contacts added, ${result.skipped} skipped`);
+      setSelectedIds(new Set());
+      setTimeout(() => { setShowColdOutreachModal(false); setOutreachMessage(''); }, 2000);
+    } catch (err) {
+      setOutreachMessage(err instanceof Error ? err.message : 'Failed');
+    } finally {
+      setOutreachSending(false);
+    }
+  };
+
+  const openColdOutreachModal = async () => {
+    setShowColdOutreachModal(true);
+    try {
+      const lists = await apiRequest<Array<{ id: string; name: string }>>('/cold-email/prospect-lists');
+      setProspectLists(Array.isArray(lists) ? lists : []);
+    } catch { setProspectLists([]); }
+  };
 
   const filteredContacts = contacts.filter(contact => {
     const matchesSearch =
@@ -294,6 +338,62 @@ export function Contacts() {
       </Card>
 
       {/* Contacts Table */}
+      {selectedIds.size > 0 && (
+        <div className="flex items-center justify-between px-5 py-2.5 bg-primary/5 border border-primary/20 rounded-lg">
+          <span className="text-sm text-foreground font-medium">{selectedIds.size} contact{selectedIds.size > 1 ? 's' : ''} selected</span>
+          <div className="flex gap-2">
+            <Button size="sm" variant="outline" onClick={() => setSelectedIds(new Set())}>Clear</Button>
+            <Button size="sm" onClick={() => void openColdOutreachModal()}>
+              <Send className="h-3.5 w-3.5 mr-1.5" />Send to Cold Outreach
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {showColdOutreachModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowColdOutreachModal(false)} />
+          <div className="relative bg-background rounded-2xl shadow-2xl w-full max-w-md border border-border">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-border">
+              <div>
+                <h2 className="text-base font-semibold text-foreground">Send to Cold Outreach</h2>
+                <p className="text-xs text-muted-foreground mt-0.5">{selectedIds.size} contacts selected</p>
+              </div>
+              <button onClick={() => setShowColdOutreachModal(false)} className="p-1.5 rounded-md hover:bg-muted text-muted-foreground"><X className="h-4 w-4" /></button>
+            </div>
+            <div className="px-6 py-5 space-y-4">
+              <div className="flex gap-2">
+                <button type="button" onClick={() => setOutreachMode('existing')} className={`text-xs px-3 py-1.5 rounded ${outreachMode === 'existing' ? 'bg-primary text-white' : 'bg-muted text-muted-foreground'}`}>Existing List</button>
+                <button type="button" onClick={() => setOutreachMode('new')} className={`text-xs px-3 py-1.5 rounded ${outreachMode === 'new' ? 'bg-primary text-white' : 'bg-muted text-muted-foreground'}`}>New List</button>
+              </div>
+              {outreachMode === 'existing' ? (
+                <div className="space-y-1.5">
+                  <Label className="text-sm">Select Prospect List</Label>
+                  <Select value={selectedListId} onValueChange={setSelectedListId}>
+                    <SelectTrigger><SelectValue placeholder="Choose a list..." /></SelectTrigger>
+                    <SelectContent>
+                      {prospectLists.map(l => <SelectItem key={l.id} value={l.id}>{l.name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  <Label className="text-sm">New List Name</Label>
+                  <Input placeholder="e.g. Q3 Leads" value={newListName} onChange={e => setNewListName(e.target.value)} />
+                </div>
+              )}
+              {outreachMessage && <p className={`text-xs text-center ${outreachMessage.includes('Failed') ? 'text-destructive' : 'text-emerald-600'}`}>{outreachMessage}</p>}
+              <div className="flex justify-end gap-2 pt-2 border-t">
+                <Button variant="outline" size="sm" onClick={() => setShowColdOutreachModal(false)}>Cancel</Button>
+                <Button size="sm" onClick={() => void handleSendToColdOutreach()} disabled={outreachSending || (outreachMode === 'existing' && !selectedListId) || (outreachMode === 'new' && !newListName.trim())}>
+                  {outreachSending ? 'Sending...' : `Import ${selectedIds.size} Contacts`}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       <Card className="overflow-hidden p-0">
         <div className="flex items-center justify-between px-5 py-3.5 border-b border-border">
           <div className="flex items-center gap-2">
@@ -308,6 +408,7 @@ export function Contacts() {
           <table className="w-full">
             <thead>
               <tr className="border-b border-border bg-muted/30">
+                <th className="px-3 py-3 w-8"><Checkbox checked={selectedIds.size === filteredContacts.length && filteredContacts.length > 0} onCheckedChange={toggleSelectAll} /></th>
                 <th className="px-5 py-3 text-left text-xs font-medium text-muted-foreground">Contact</th>
                 <th className="px-5 py-3 text-left text-xs font-medium text-muted-foreground hidden md:table-cell">Company</th>
                 <th className="px-5 py-3 text-left text-xs font-medium text-muted-foreground">Status</th>
@@ -319,6 +420,7 @@ export function Contacts() {
             <tbody className="divide-y divide-border">
               {filteredContacts.map((contact) => (
                 <tr key={contact.id} className="hover:bg-muted/20 transition-colors group">
+                  <td className="px-3 py-3.5"><Checkbox checked={selectedIds.has(contact.id)} onCheckedChange={() => toggleSelect(contact.id)} /></td>
                   <td className="px-5 py-3.5">
                     <Link to={`/contacts/${contact.id}`} className="flex items-center gap-3">
                       <Avatar className={`h-9 w-9 ${getAvatarColor(contact.id)}`}>

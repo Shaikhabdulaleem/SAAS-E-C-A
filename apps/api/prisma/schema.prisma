@@ -256,6 +256,7 @@ model Tenant {
   sendingDomains         SendingDomain[]
   personas               Persona[]
   emailProviderCredentials EmailProviderCredential[]
+  emailFinderCredentials EmailFinderCredential[]
   billingSubscriptions BillingSubscription[]
   invoices             Invoice[]
   paymentMethods       PaymentMethodRef[]
@@ -434,6 +435,7 @@ model Contact {
   tenant         Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   company        Company?      @relation(fields: [companyId], references: [id], onDelete: SetNull)
   activities     Activity[]
+  coldProspects  ColdProspect[]
 
   @@unique([tenantId, email])
   @@index([tenantId, status])
@@ -1441,6 +1443,7 @@ model ColdProspectList {
 model ColdProspect {
   id              String              @id @default(uuid())
   listId          String
+  contactId       String?
   email           String
   firstName       String
   lastName        String
@@ -1454,10 +1457,12 @@ model ColdProspect {
   validationStatus ProspectValidation @default(pending)
   createdAt       DateTime            @default(now())
   list            ColdProspectList    @relation(fields: [listId], references: [id], onDelete: Cascade)
+  contact         Contact?            @relation(fields: [contactId], references: [id], onDelete: SetNull)
   sequenceStates  ColdSequenceState[]
 
   @@unique([listId, email])
   @@index([listId, validationStatus])
+  @@index([contactId])
 }
 
 model ColdCampaign {
@@ -1574,6 +1579,22 @@ model EmailProviderCredential {
   tenant            Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   domains           SendingDomain[]
   externalAccounts  ProviderExternalAccount[]
+
+  @@unique([tenantId, providerType])
+  @@index([tenantId])
+}
+
+model EmailFinderCredential {
+  id              String   @id @default(uuid())
+  tenantId        String
+  providerType    String   @default("apollo")
+  apiKeyCipher    String
+  isActive        Boolean  @default(true)
+  connectedAt     DateTime @default(now())
+  lastUsedAt      DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@unique([tenantId, providerType])
   @@index([tenantId])

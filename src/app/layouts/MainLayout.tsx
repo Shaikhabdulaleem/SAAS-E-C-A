@@ -120,6 +120,7 @@ function buildNavGroups(user: User | null, activeServices: string[] = [], isImpe
         { name: 'Personas', href: '/cold-email/personas', icon: UserCircle },
         { name: 'Domain Health', href: '/cold-email/domain-health', icon: HeartPulse },
         { name: 'Warmup', href: '/cold-email/warmup', icon: Flame },
+        { name: 'Email Finder', href: '/cold-email/email-finder', icon: Search },
       ],
     });
   }
