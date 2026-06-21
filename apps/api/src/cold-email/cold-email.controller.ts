@@ -29,6 +29,11 @@ export class SendingDomainsController {
     return this.coldEmail.addDomain(tenantId(user, selectedTenantId), body);
   }
 
+  @Post('bulk')
+  bulkCreate(@CurrentUser() user: AuthenticatedUser, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.coldEmail.bulkAddDomains(tenantId(user, selectedTenantId), body);
+  }
+
   @Post(':domainId/verify')
   verify(@CurrentUser() user: AuthenticatedUser, @Param('domainId') domainId: string, @Headers('x-tenant-id') selectedTenantId?: string) {
     return this.coldEmail.verifyDomain(tenantId(user, selectedTenantId), domainId, user.id);
@@ -59,6 +64,11 @@ export class ColdMailboxController {
   @Post()
   create(@CurrentUser() user: AuthenticatedUser, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
     return this.coldEmail.createMailbox(tenantId(user, selectedTenantId), body);
+  }
+
+  @Post('test-smtp')
+  testSmtp(@CurrentUser() user: AuthenticatedUser, @Body() body: Record<string, unknown>) {
+    return this.coldEmail.testSmtpConnection(body);
   }
 
   @Patch(':id')
@@ -189,6 +199,16 @@ export class ColdCampaignController {
   analytics(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Headers('x-tenant-id') selectedTenantId?: string) {
     return this.coldEmail.getCampaignAnalytics(tenantId(user, selectedTenantId), id);
   }
+
+  @Post(':id/test-send')
+  testSend(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.coldEmail.testSend(tenantId(user, selectedTenantId), id, body);
+  }
+
+  @Post(':id/duplicate')
+  duplicate(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.coldEmail.duplicateCampaign(tenantId(user, selectedTenantId), id);
+  }
 }
 
 @Controller('cold-email/send-engine')
@@ -205,5 +225,17 @@ export class ColdSendEngineController {
   @Post(':campaignId/events')
   event(@CurrentUser() user: AuthenticatedUser, @Param('campaignId') campaignId: string, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
     return this.coldEmail.ingestEvent(tenantId(user, selectedTenantId), campaignId, body);
+  }
+}
+
+// ── Webhook (no auth — server-to-server from SendGrid) ──
+
+@Controller('webhooks/cold-email')
+export class ColdEmailWebhookController {
+  constructor(private readonly coldEmail: ColdEmailService) {}
+
+  @Post('sendgrid')
+  async handleSendGridEvents(@Body() body: unknown) {
+    return this.coldEmail.handleSendGridWebhook(body);
   }
 }

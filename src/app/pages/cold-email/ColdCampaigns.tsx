@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router';
-import { Plus, Mail, MoreHorizontal, X, Send, Eye, MessageSquare, AlertTriangle, Clock, CheckCircle, Play, Pause, Trash2, Target, BarChart2 } from 'lucide-react';
+import { Plus, Mail, MoreHorizontal, X, Send, Eye, MessageSquare, AlertTriangle, Clock, CheckCircle, Play, Pause, Trash2, Target, BarChart2, Copy } from 'lucide-react';
 import { Card, CardContent } from '../../components/ui/card';
 import { Button } from '../../components/ui/button';
 import { Badge } from '../../components/ui/badge';
@@ -157,6 +157,13 @@ export function ColdCampaigns() {
     try {
       await apiRequest(`/cold-email/campaigns/${id}`, { method: 'DELETE' });
       setCampaigns(prev => prev.filter(c => c.id !== id));
+    } catch {}
+  };
+
+  const handleDuplicate = async (id: string) => {
+    try {
+      const copy = await apiRequest<ColdCampaign>(`/cold-email/campaigns/${id}/duplicate`, { method: 'POST' });
+      setCampaigns(prev => [copy, ...prev]);
     } catch {}
   };
 
@@ -431,6 +438,10 @@ export function ColdCampaigns() {
                           Activate
                         </DropdownMenuItem>
                       ) : null}
+                      <DropdownMenuItem onClick={() => void handleDuplicate(campaign.id)}>
+                        <Copy className="h-3.5 w-3.5 mr-2" />
+                        Duplicate
+                      </DropdownMenuItem>
                       <Separator className="my-1" />
                       <DropdownMenuItem className="text-destructive" onClick={() => handleDelete(campaign.id)}>
                         <Trash2 className="h-3.5 w-3.5 mr-2" />

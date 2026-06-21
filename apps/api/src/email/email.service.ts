@@ -4,6 +4,7 @@ import { createHash, randomBytes, createVerify } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { EmailDeliveryService } from '../providers/services/email-delivery.service';
 import { JobsService } from '../providers/services/jobs.service';
+import { DnsProviderService } from '../providers/services/dns-provider.service';
 
 type AudienceFilter = {
   mode?: 'all' | 'manual';
@@ -19,6 +20,7 @@ export class EmailService {
     private readonly prisma: PrismaService,
     private readonly delivery: EmailDeliveryService,
     private readonly jobs: JobsService,
+    private readonly dnsProvider: DnsProviderService,
   ) {}
 
   listCampaigns(tenantId: string, query: Record<string, string>) {
@@ -49,7 +51,11 @@ export class EmailService {
         fromName: this.requiredString(body.fromName, 'fromName'),
         fromEmail: this.requiredString(body.fromEmail, 'fromEmail').toLowerCase(),
         body: this.optionalString(body.body),
+        contentBlocks: this.optionalJson(body.contentBlocks),
         templateId: this.optionalString(body.templateId),
+        abTestEnabled: this.optionalBoolean(body.abTestEnabled, false),
+        abVariants: this.optionalJson(body.abVariants),
+        selectedVariant: this.optionalString(body.selectedVariant),
         status: requestedStatus === CampaignStatus.scheduled ? CampaignStatus.draft : requestedStatus,
         scheduledAt: typeof body.scheduledAt === 'string' ? this.parseDate(body.scheduledAt, 'scheduledAt') : undefined,
         totalRecipients: 0,
@@ -85,6 +91,10 @@ export class EmailService {
         fromName: this.optionalString(body.fromName),
         fromEmail: this.optionalString(body.fromEmail)?.toLowerCase(),
         body: this.optionalString(body.body),
+        contentBlocks: this.optionalJson(body.contentBlocks),
+        abTestEnabled: this.optionalBoolean(body.abTestEnabled),
+        abVariants: this.optionalJson(body.abVariants),
+        selectedVariant: this.optionalString(body.selectedVariant),
         status: this.optionalEnum(body.status, [CampaignStatus.draft, CampaignStatus.cancelled]),
         scheduledAt: typeof body.scheduledAt === 'string' ? this.parseDate(body.scheduledAt, 'scheduledAt') : undefined,
         previewText: this.optionalString(body.previewText),
@@ -126,6 +136,47 @@ export class EmailService {
         firstName: contact.firstName,
         lastName: contact.lastName,
       })),
+    };
+  }
+
+  async readiness(tenantId: string, campaignId: string) {
+    const campaign = await this.ensureCampaign(tenantId, campaignId);
+    const filter = this.normalizeAudienceFilter(campaign.recipientFilter);
+    const contacts = await this.findAudienceContacts(tenantId, filter, 5000);
+    const suppressed = contacts.length
+      ? await this.prisma.suppressionEntry.findMany({
+        where: { tenantId, email: { in: contacts.map((contact) => contact.email.toLowerCase()) } },
+        select: { email: true },
+      })
+      : [];
+    const suppressedEmails = new Set(suppressed.map((item) => item.email.toLowerCase()));
+    const allowedRecipients = contacts.filter((contact) => !suppressedEmails.has(contact.email.toLowerCase()));
+    const domainName = campaign.fromEmail.split('@')[1]?.toLowerCase();
+    const domain = domainName ? await this.prisma.sendingDomain.findFirst({ where: { tenantId, domain: domainName } }) : null;
+    const domainVerified = !!domain && [domain.spfStatus, domain.dkimStatus, domain.dmarcStatus, domain.mxStatus].every((status) => status === DnsRecordStatus.verified);
+    const checklist = [
+      { key: 'audience', label: 'Audience has opted-in recipients', passed: allowedRecipients.length > 0, blocking: true },
+      { key: 'suppression', label: 'Suppressed contacts excluded', passed: contacts.length === allowedRecipients.length, blocking: false },
+      { key: 'sender_email', label: 'Sender email is valid', passed: this.validEmail(campaign.fromEmail), blocking: true },
+      { key: 'domain_registered', label: 'Sender domain is added', passed: !!domain, blocking: true },
+      { key: 'domain_verified', label: 'SPF, DKIM, DMARC, and MX are verified', passed: domainVerified, blocking: true },
+      { key: 'body', label: 'Campaign content is ready', passed: !!(campaign.body || campaign.bodyPlainText), blocking: true },
+      { key: 'company_address', label: 'Company address is present', passed: !!campaign.companyAddress, blocking: true },
+      { key: 'compliance', label: 'Marketing consent confirmation is enabled', passed: !!campaign.gdprConsent, blocking: true },
+      { key: 'unsubscribe', label: 'Unsubscribe footer will be added automatically', passed: true, blocking: false },
+    ];
+    const blockingErrors = checklist.filter((item) => item.blocking && !item.passed).map((item) => item.label);
+    return {
+      ready: blockingErrors.length === 0,
+      checklist,
+      blockingErrors,
+      warnings: checklist.filter((item) => !item.blocking && !item.passed).map((item) => item.label),
+      recipients: {
+        total: contacts.length,
+        suppressed: contacts.length - allowedRecipients.length,
+        allowed: allowedRecipients.length,
+      },
+      domain: domain ? this.toDomainResponse(domain) : null,
     };
   }
 
@@ -193,6 +244,7 @@ export class EmailService {
         name: this.requiredString(body.name, 'name'),
         subject: this.requiredString(body.subject, 'subject'),
         body: this.requiredString(body.body, 'body'),
+        contentBlocks: this.optionalJson(body.contentBlocks),
         category: this.optionalString(body.category),
       },
     });
@@ -206,6 +258,7 @@ export class EmailService {
         name: this.optionalString(body.name),
         subject: this.optionalString(body.subject),
         body: this.optionalString(body.body),
+        contentBlocks: this.optionalJson(body.contentBlocks),
         category: this.optionalString(body.category),
       },
     });
@@ -356,6 +409,103 @@ export class EmailService {
     };
   }
 
+  listDomains(tenantId: string) {
+    return this.prisma.sendingDomain.findMany({
+      where: { tenantId },
+      orderBy: { createdAt: 'desc' },
+    }).then((domains) => domains.map((domain) => this.toDomainResponse(domain)));
+  }
+
+  async addDomain(tenantId: string, body: Record<string, unknown>) {
+    const domain = this.requiredString(body.domain, 'domain').toLowerCase();
+    const created = await this.prisma.sendingDomain.create({
+      data: {
+        tenantId,
+        domain,
+        trackingDomain: this.optionalString(body.trackingDomain),
+        trackingCnameValue: this.optionalString(body.trackingCnameValue),
+      },
+    });
+    await this.completeOnboardingItem(tenantId, 'add_domain', 'Add domain');
+    return this.toDomainResponse(created);
+  }
+
+  async updateDomainDnsRecords(tenantId: string, domainId: string, body: Record<string, unknown>) {
+    const domain = await this.ensureDomain(tenantId, domainId);
+    const dkimType = this.optionalString(body.dkimType)?.toUpperCase();
+    if (dkimType && !['TXT', 'CNAME'].includes(dkimType)) throw new BadRequestException('dkimType must be TXT or CNAME');
+    const dkimSelector = this.optionalString(body.dkimSelector);
+    const updated = await this.prisma.sendingDomain.update({
+      where: { id: domain.id },
+      data: {
+        dkimSelector,
+        dkimType,
+        dkimHost: this.optionalString(body.dkimHost) ?? (dkimSelector ? `${dkimSelector}._domainkey.${domain.domain}` : undefined),
+        dkimValue: this.optionalString(body.dkimValue),
+        trackingDomain: this.optionalString(body.trackingDomain),
+        trackingCnameValue: this.optionalString(body.trackingCnameValue),
+        dkimStatus: DnsRecordStatus.not_set,
+        trackingDomainActive: false,
+      },
+    });
+    return this.toDomainResponse(updated);
+  }
+
+  async verifyDomain(tenantId: string, domainId: string) {
+    const domain = await this.ensureDomain(tenantId, domainId);
+    const verification = await this.dnsProvider.verify(domain.domain, domain);
+    const updated = await this.prisma.sendingDomain.update({
+      where: { id: domainId },
+      data: {
+        spfStatus: verification.spfValid ? DnsRecordStatus.verified : DnsRecordStatus.not_set,
+        dkimStatus: verification.dkimValid ? DnsRecordStatus.verified : DnsRecordStatus.not_set,
+        dmarcStatus: verification.dmarcValid ? DnsRecordStatus.verified : DnsRecordStatus.not_set,
+        mxStatus: verification.mxValid ? DnsRecordStatus.verified : DnsRecordStatus.not_set,
+        trackingDomainActive: verification.trackingValid,
+        lastCheckedAt: new Date(),
+      },
+    });
+    if ([updated.spfStatus, updated.dkimStatus, updated.dmarcStatus, updated.mxStatus].every((status) => status === DnsRecordStatus.verified)) {
+      await this.completeOnboardingItem(tenantId, 'verify_dns', 'Verify DNS');
+    }
+    return this.toDomainResponse(updated);
+  }
+
+  async removeDomain(tenantId: string, domainId: string) {
+    await this.ensureDomain(tenantId, domainId);
+    await this.prisma.sendingDomain.delete({ where: { id: domainId } });
+    return { success: true };
+  }
+
+  async createFollowUpCampaign(tenantId: string, userId: string, campaignId: string, body: Record<string, unknown>) {
+    const source = await this.ensureCampaign(tenantId, campaignId);
+    const segment = this.optionalEnum(body.segment, ['openers', 'clickers', 'non_openers'], 'clickers') ?? 'clickers';
+    const recipients = await this.prisma.campaignRecipient.findMany({ where: { campaignId } });
+    const contactIds = recipients
+      .filter((recipient) => {
+        if (segment === 'openers') return !!recipient.openedAt;
+        if (segment === 'clickers') return !!recipient.clickedAt;
+        return !recipient.openedAt;
+      })
+      .map((recipient) => recipient.contactId)
+      .filter((id): id is string => !!id);
+    return this.createCampaign(tenantId, userId, {
+      name: `${source.name} ${segment.replace('_', ' ')} follow-up`,
+      subject: `Re: ${source.subject}`,
+      fromName: source.fromName,
+      fromEmail: source.fromEmail,
+      replyToEmail: source.replyToEmail ?? undefined,
+      body: source.body ?? '',
+      bodyPlainText: source.bodyPlainText ?? undefined,
+      companyAddress: source.companyAddress ?? undefined,
+      gdprConsent: source.gdprConsent,
+      trackOpens: source.trackOpens,
+      trackClicks: source.trackClicks,
+      recipientFilter: { mode: 'manual', contactIds },
+      status: CampaignStatus.draft,
+    });
+  }
+
   private async prepareCampaignSend(tenantId: string, campaignId: string, scheduledAt?: Date) {
     if (!process.env.REDIS_URL) throw new BadRequestException('Redis is required for Email Marketing sending and scheduling');
     const campaign = await this.ensureCampaign(tenantId, campaignId);
@@ -439,6 +589,31 @@ export class EmailService {
     const verified = [sendingDomain.spfStatus, sendingDomain.dkimStatus, sendingDomain.dmarcStatus, sendingDomain.mxStatus]
       .every((status) => status === DnsRecordStatus.verified);
     if (!verified) throw new BadRequestException(`Sender domain ${domain} must have verified SPF, DKIM, DMARC, and MX records before sending`);
+  }
+
+  private async ensureDomain(tenantId: string, domainId: string) {
+    const domain = await this.prisma.sendingDomain.findFirst({ where: { tenantId, id: domainId } });
+    if (!domain) throw new NotFoundException('Sending domain not found');
+    return domain;
+  }
+
+  private toDomainResponse(domain: {
+    domain: string;
+    spfStatus?: string;
+    dkimStatus?: string;
+    dmarcStatus?: string;
+    mxStatus?: string;
+    dkimType?: string | null;
+    dkimHost?: string | null;
+    dkimValue?: string | null;
+    trackingDomain?: string | null;
+    trackingCnameValue?: string | null;
+    trackingDomainActive?: boolean;
+  } & Record<string, unknown>) {
+    return {
+      ...domain,
+      dnsRecords: this.dnsProvider.requiredRecords(domain),
+    };
   }
 
   private async ensureNotSuppressed(tenantId: string, email: string) {
@@ -527,9 +702,13 @@ export class EmailService {
   }
 
   private completeLaunchOnboarding(tenantId: string) {
+    return this.completeOnboardingItem(tenantId, 'launch_first_campaign', 'Launch first campaign');
+  }
+
+  private completeOnboardingItem(tenantId: string, key: string, label: string) {
     return this.prisma.onboardingItem.upsert({
-      where: { tenantId_key: { tenantId, key: 'launch_first_campaign' } },
-      create: { tenantId, key: 'launch_first_campaign', label: 'Launch first campaign', completedAt: new Date() },
+      where: { tenantId_key: { tenantId, key } },
+      create: { tenantId, key, label, completedAt: new Date() },
       update: { completedAt: new Date() },
     }).catch(() => undefined);
   }
@@ -631,6 +810,11 @@ export class EmailService {
     if (value === 'true') return true;
     if (value === 'false') return false;
     return fallback;
+  }
+
+  private optionalJson(value: unknown): Prisma.InputJsonValue | undefined {
+    if (value === undefined) return undefined;
+    return value as Prisma.InputJsonValue;
   }
 
   private optionalEnum<T extends string>(value: unknown, allowed: T[], fallback?: T) {

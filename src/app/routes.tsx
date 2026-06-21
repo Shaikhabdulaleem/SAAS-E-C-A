@@ -19,6 +19,7 @@ import { CampaignDetail } from "./pages/email/CampaignDetail";
 import { Templates } from "./pages/email/Templates";
 import { Suppressions } from "./pages/email/Suppressions";
 import { AudienceSetup } from "./pages/email/AudienceSetup";
+import { DomainSetup } from "./pages/email/DomainSetup";
 import { ColdCampaigns } from "./pages/cold-email/ColdCampaigns";
 import { ColdCampaignDetail } from "./pages/cold-email/ColdCampaignDetail";
 import { ColdMailboxes } from "./pages/cold-email/Mailboxes";
@@ -79,6 +80,7 @@ export const router = createBrowserRouter([
       { path: "finance", element: withService("finance", <Finance />) },
       { path: "campaigns", element: withService("email_marketing", <Campaigns />) },
       { path: "audience-setup", element: withService("email_marketing", <AudienceSetup />) },
+      { path: "domain-setup", element: withService("email_marketing", <DomainSetup />) },
       { path: "campaigns/:id", element: withService("email_marketing", <CampaignDetail />) },
       { path: "templates", element: withService("email_marketing", <Templates />) },
       { path: "suppressions", element: withService("email_marketing", <Suppressions />) },

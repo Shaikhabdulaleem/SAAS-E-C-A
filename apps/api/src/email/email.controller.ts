@@ -49,9 +49,19 @@ export class EmailController {
     return this.email.previewAudience(tenantId(user, selectedTenantId), campaignId, body);
   }
 
+  @Get(':campaignId/readiness')
+  readiness(@CurrentUser() user: AuthenticatedUser, @Param('campaignId') campaignId: string, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.email.readiness(tenantId(user, selectedTenantId), campaignId);
+  }
+
   @Post(':campaignId/send-now')
   sendNow(@CurrentUser() user: AuthenticatedUser, @Param('campaignId') campaignId: string, @Headers('x-tenant-id') selectedTenantId?: string) {
     return this.email.sendCampaignNow(tenantId(user, selectedTenantId), campaignId);
+  }
+
+  @Post(':campaignId/follow-up')
+  followUp(@CurrentUser() user: AuthenticatedUser, @Param('campaignId') campaignId: string, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.email.createFollowUpCampaign(tenantId(user, selectedTenantId), user.id, campaignId, body);
   }
 
   @Post(':campaignId/cancel')
@@ -82,6 +92,38 @@ export class EmailController {
   @Delete(':campaignId')
   remove(@CurrentUser() user: AuthenticatedUser, @Param('campaignId') campaignId: string, @Headers('x-tenant-id') selectedTenantId?: string) {
     return this.email.deleteCampaign(tenantId(user, selectedTenantId), campaignId);
+  }
+}
+
+@Controller('email/domains')
+@RequireService('email_marketing')
+@UseGuards(JwtAuthGuard, ServiceAccessGuard)
+export class EmailDomainsController {
+  constructor(private readonly email: EmailService) {}
+
+  @Get()
+  list(@CurrentUser() user: AuthenticatedUser, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.email.listDomains(tenantId(user, selectedTenantId));
+  }
+
+  @Post()
+  create(@CurrentUser() user: AuthenticatedUser, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.email.addDomain(tenantId(user, selectedTenantId), body);
+  }
+
+  @Patch(':domainId/dns-records')
+  updateDns(@CurrentUser() user: AuthenticatedUser, @Param('domainId') domainId: string, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.email.updateDomainDnsRecords(tenantId(user, selectedTenantId), domainId, body);
+  }
+
+  @Post(':domainId/verify')
+  verify(@CurrentUser() user: AuthenticatedUser, @Param('domainId') domainId: string, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.email.verifyDomain(tenantId(user, selectedTenantId), domainId);
+  }
+
+  @Delete(':domainId')
+  remove(@CurrentUser() user: AuthenticatedUser, @Param('domainId') domainId: string, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.email.removeDomain(tenantId(user, selectedTenantId), domainId);
   }
 }
 

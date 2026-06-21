@@ -6,9 +6,12 @@ import {
   MailboxStatus,
   WarmupStatus,
 } from '@prisma/client';
+import * as dns from 'dns';
+import * as net from 'net';
 import { PrismaService } from '../prisma/prisma.service';
 import { DnsProviderService } from '../providers/services/dns-provider.service';
 import { JobsService } from '../providers/services/jobs.service';
+import { EmailDeliveryService } from '../providers/services/email-delivery.service';
 
 @Injectable()
 export class ColdEmailService {
@@ -16,6 +19,7 @@ export class ColdEmailService {
     private readonly prisma: PrismaService,
     private readonly dnsProvider: DnsProviderService,
     private readonly jobs: JobsService,
+    private readonly emailDelivery: EmailDeliveryService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -812,5 +816,194 @@ export class ColdEmailService {
     if (value === undefined || value === null || value === '') return fallback;
     if (!allowed.includes(value as T)) throw new BadRequestException('Invalid enum value');
     return value as T;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Bulk Domain Add (Gap 4)
+  // ---------------------------------------------------------------------------
+
+  async bulkAddDomains(tenantId: string, body: Record<string, unknown>) {
+    const domains = Array.isArray(body.domains) ? body.domains : [];
+    if (domains.length === 0) throw new BadRequestException('domains array is required');
+
+    const results: Array<{ domain: string; status: string; id?: string }> = [];
+    for (const raw of domains) {
+      const domain = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+      if (!domain || !domain.includes('.')) { results.push({ domain: String(raw), status: 'invalid' }); continue; }
+      const existing = await this.prisma.sendingDomain.findFirst({ where: { tenantId, domain } });
+      if (existing) { results.push({ domain, status: 'duplicate', id: existing.id }); continue; }
+      const created = await this.prisma.sendingDomain.create({
+        data: { tenantId, domain, spfStatus: DnsRecordStatus.not_set, dkimStatus: DnsRecordStatus.not_set, dmarcStatus: DnsRecordStatus.not_set, mxStatus: DnsRecordStatus.not_set },
+      });
+      results.push({ domain, status: 'created', id: created.id });
+    }
+    return { total: domains.length, created: results.filter((r) => r.status === 'created').length, duplicates: results.filter((r) => r.status === 'duplicate').length, results };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Test Send (Gap 7)
+  // ---------------------------------------------------------------------------
+
+  async testSend(tenantId: string, campaignId: string, body: Record<string, unknown>) {
+    const email = this.requiredString(body.email, 'email');
+    const stepIndex = this.optionalNumber(body.stepIndex, 0) ?? 0;
+    const campaign = await this.ensureCampaign(tenantId, campaignId);
+    const steps = await this.prisma.coldSequenceStep.findMany({ where: { campaignId }, orderBy: { stepOrder: 'asc' } });
+    if (steps.length === 0) throw new BadRequestException('Campaign has no steps');
+    const step = steps[stepIndex] ?? steps[0];
+
+    const subject = step.subject
+      .replace(/\{\{firstName\}\}/g, 'Test').replace(/\{\{first_name\}\}/g, 'Test')
+      .replace(/\{\{lastName\}\}/g, 'User').replace(/\{\{last_name\}\}/g, 'User')
+      .replace(/\{\{company\}\}/g, 'Test Company').replace(/\{\{jobTitle\}\}/g, 'CEO').replace(/\{\{job_title\}\}/g, 'CEO')
+      .replace(/\{\{email\}\}/g, email);
+    const html = step.body
+      .replace(/\{\{firstName\}\}/g, 'Test').replace(/\{\{first_name\}\}/g, 'Test')
+      .replace(/\{\{lastName\}\}/g, 'User').replace(/\{\{last_name\}\}/g, 'User')
+      .replace(/\{\{company\}\}/g, 'Test Company').replace(/\{\{jobTitle\}\}/g, 'CEO').replace(/\{\{job_title\}\}/g, 'CEO')
+      .replace(/\{\{email\}\}/g, email);
+
+    const mailboxes = await this.prisma.coldCampaignMailbox.findMany({ where: { campaignId }, include: { mailbox: true } });
+    const fromEmail = mailboxes[0]?.mailbox?.email ?? 'test@example.com';
+    const fromName = mailboxes[0]?.mailbox?.fromName ?? 'Test Sender';
+
+    await this.emailDelivery.send({ tenantId, to: email, fromEmail, fromName, subject, html });
+    return { sent: true, to: email, subject };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Duplicate Campaign (Gap 8)
+  // ---------------------------------------------------------------------------
+
+  async duplicateCampaign(tenantId: string, campaignId: string) {
+    const campaign = await this.prisma.coldCampaign.findFirst({
+      where: { tenantId, id: campaignId },
+      include: { steps: { orderBy: { stepOrder: 'asc' } }, mailboxes: true },
+    });
+    if (!campaign) throw new NotFoundException('Campaign not found');
+
+    const copy = await this.prisma.coldCampaign.create({
+      data: {
+        tenantId, name: `${campaign.name} (copy)`, goal: campaign.goal, listId: campaign.listId,
+        status: 'draft', stopOnReply: campaign.stopOnReply, stopOnUnsubscribe: campaign.stopOnUnsubscribe,
+        trackOpens: campaign.trackOpens, trackClicks: campaign.trackClicks, trackingDomain: campaign.trackingDomain,
+        totalProspects: 0, sentCount: 0, openCount: 0, replyCount: 0, positiveReplyCount: 0, bounceCount: 0, unsubCount: 0,
+        createdBy: campaign.createdBy,
+        steps: { create: campaign.steps.map((s) => ({ stepOrder: s.stepOrder, subject: s.subject, body: s.body, delayDays: s.delayDays, useThreading: s.useThreading })) },
+        mailboxes: { create: campaign.mailboxes.map((m) => ({ mailboxId: m.mailboxId })) },
+      },
+      include: { steps: true, mailboxes: { include: { mailbox: true } } },
+    });
+    return copy;
+  }
+
+  // ---------------------------------------------------------------------------
+  // SMTP Connection Test (Gap 10)
+  // ---------------------------------------------------------------------------
+
+  async testSmtpConnection(body: Record<string, unknown>) {
+    const host = this.requiredString(body.host, 'host');
+    const port = this.optionalNumber(body.port, 587) ?? 587;
+
+    return new Promise<{ success: boolean; banner?: string; error?: string }>((resolve) => {
+      const socket = net.createConnection({ host, port, timeout: 10000 }, () => {
+        socket.once('data', (data) => {
+          const banner = data.toString().trim();
+          socket.end();
+          resolve({ success: true, banner });
+        });
+      });
+      socket.on('error', (err) => { resolve({ success: false, error: err.message }); });
+      socket.on('timeout', () => { socket.destroy(); resolve({ success: false, error: 'Connection timed out' }); });
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // SendGrid Webhook Handler (Gap 3)
+  // ---------------------------------------------------------------------------
+
+  async handleSendGridWebhook(rawBody: unknown) {
+    const events = Array.isArray(rawBody) ? rawBody : [];
+    let processed = 0;
+
+    const typeMap: Record<string, string> = {
+      delivered: 'delivered', open: 'opened', click: 'clicked',
+      bounce: 'bounce', dropped: 'bounce', deferred: 'deferred',
+      unsubscribe: 'unsubscribe', group_unsubscribe: 'unsubscribe',
+      spamreport: 'spam',
+    };
+
+    for (const event of events) {
+      const sgType = event?.event as string | undefined;
+      const mappedType = sgType ? typeMap[sgType] : undefined;
+      if (!mappedType) continue;
+
+      const customArgs = event?.custom_args ?? event ?? {};
+      const campaignId = customArgs.campaignId as string | undefined;
+      const prospectId = (customArgs.recipientId ?? customArgs.prospect_id) as string | undefined;
+      if (!campaignId) continue;
+
+      const campaign = await this.prisma.coldCampaign.findUnique({ where: { id: campaignId } });
+      if (!campaign) continue;
+
+      await this.prisma.coldEmailEvent.create({
+        data: { campaignId, prospectId: prospectId ?? '', type: mappedType, metadata: event as any },
+      }).catch(() => undefined);
+
+      const counterUpdate: Record<string, any> = {};
+      if (mappedType === 'opened') counterUpdate.openCount = { increment: 1 };
+      if (mappedType === 'bounce') counterUpdate.bounceCount = { increment: 1 };
+      if (mappedType === 'unsubscribe') counterUpdate.unsubCount = { increment: 1 };
+      if (Object.keys(counterUpdate).length > 0) {
+        await this.prisma.coldCampaign.update({ where: { id: campaignId }, data: counterUpdate }).catch(() => undefined);
+      }
+
+      if (prospectId && (mappedType === 'bounce' || mappedType === 'unsubscribe')) {
+        const prospect = await this.prisma.coldProspect.findUnique({ where: { id: prospectId } });
+        if (prospect && campaign.tenantId) {
+          await this.prisma.suppressionEntry.upsert({
+            where: { tenantId_email: { tenantId: campaign.tenantId, email: prospect.email } },
+            update: { source: mappedType === 'bounce' ? 'bounce' : 'unsubscribe' },
+            create: { tenantId: campaign.tenantId, email: prospect.email, source: mappedType === 'bounce' ? 'bounce' : 'unsubscribe' },
+          }).catch(() => undefined);
+          await this.prisma.coldSequenceState.updateMany({
+            where: { campaignId, prospectId, status: { in: ['queued', 'active'] } },
+            data: { status: mappedType === 'bounce' ? 'bounced' : 'unsubscribed', completedAt: new Date() },
+          });
+        }
+      }
+
+      processed++;
+    }
+
+    return { processed };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Prospect Email Validation via MX (Gap 12)
+  // ---------------------------------------------------------------------------
+
+  async validateProspectEmails(prospectIds: string[]) {
+    if (prospectIds.length === 0) return;
+    const prospects = await this.prisma.coldProspect.findMany({ where: { id: { in: prospectIds } } });
+    const domainMap = new Map<string, string[]>();
+    for (const p of prospects) {
+      const domain = p.email.split('@')[1]?.toLowerCase();
+      if (!domain) continue;
+      if (!domainMap.has(domain)) domainMap.set(domain, []);
+      domainMap.get(domain)!.push(p.id);
+    }
+
+    for (const [domain, ids] of domainMap) {
+      try {
+        const records = await new Promise<dns.MxRecord[]>((resolve, reject) => {
+          dns.resolveMx(domain, (err, addresses) => err ? reject(err) : resolve(addresses));
+        });
+        const status = records && records.length > 0 ? 'valid' : 'risky';
+        await this.prisma.coldProspect.updateMany({ where: { id: { in: ids } }, data: { validationStatus: status } });
+      } catch {
+        await this.prisma.coldProspect.updateMany({ where: { id: { in: ids } }, data: { validationStatus: 'invalid' } });
+      }
+    }
   }
 }

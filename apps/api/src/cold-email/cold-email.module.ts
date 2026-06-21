@@ -7,6 +7,7 @@ import {
   ColdProspectListController,
   ColdCampaignController,
   ColdSendEngineController,
+  ColdEmailWebhookController,
 } from './cold-email.controller';
 import { ColdEmailService } from './cold-email.service';
 
@@ -18,6 +19,7 @@ import { ColdEmailService } from './cold-email.service';
     ColdProspectListController,
     ColdCampaignController,
     ColdSendEngineController,
+    ColdEmailWebhookController,
   ],
   providers: [ColdEmailService],
 })

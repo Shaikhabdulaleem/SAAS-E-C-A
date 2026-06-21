@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router';
-import { ArrowLeft, Plus, Mail, X, Send, Eye, MessageSquare, AlertTriangle, Clock, CheckCircle, Play, Pause, Trash2, Target, Users, BarChart2, ThumbsUp, ChevronDown } from 'lucide-react';
+import { ArrowLeft, Plus, Mail, X, Send, Eye, MessageSquare, AlertTriangle, Clock, CheckCircle, Play, Pause, Trash2, Target, Users, BarChart2, ThumbsUp, ChevronDown, Pencil, TestTube } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../../components/ui/card';
 import { Button } from '../../components/ui/button';
 import { Badge } from '../../components/ui/badge';
@@ -78,8 +78,13 @@ export function ColdCampaignDetail() {
   const [analytics, setAnalytics] = useState<CampaignAnalytics | null>(null);
   const [loading, setLoading] = useState(true);
   const [showStepModal, setShowStepModal] = useState(false);
+  const [editingStepIndex, setEditingStepIndex] = useState<number | null>(null);
   const [stepForm, setStepForm] = useState({ ...defaultStepForm });
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [showTestSend, setShowTestSend] = useState(false);
+  const [testEmail, setTestEmail] = useState('');
+  const [testSending, setTestSending] = useState(false);
+  const [testMessage, setTestMessage] = useState('');
 
   useEffect(() => { fetchData(); }, [id]);
 
@@ -110,6 +115,27 @@ export function ColdCampaignDetail() {
     const errs: Record<string, string> = {};
     if (!stepForm.body.trim()) errs.body = 'Email body is required';
     if (Object.keys(errs).length > 0) { setErrors(errs); return; }
+
+    if (editingStepIndex !== null && campaign) {
+      const updatedSteps = campaign.steps.map((s, i) =>
+        i === editingStepIndex
+          ? { ...stepForm, stepOrder: i }
+          : { subject: s.subject, body: s.body, delayDays: s.delayDays, useThreading: s.useThreading, stepOrder: i }
+      );
+      try {
+        const updated = await apiRequest<ColdCampaignFull>(`/cold-email/campaigns/${id}/steps`, {
+          method: 'POST',
+          body: JSON.stringify({ steps: updatedSteps }),
+        });
+        setCampaign(updated);
+        setShowStepModal(false);
+        setEditingStepIndex(null);
+        setStepForm({ ...defaultStepForm });
+        setErrors({});
+      } catch {}
+      return;
+    }
+
     try {
       const updated = await apiRequest<ColdCampaignFull>(`/cold-email/campaigns/${id}/steps`, {
         method: 'POST',
@@ -120,6 +146,46 @@ export function ColdCampaignDetail() {
       setStepForm({ ...defaultStepForm });
       setErrors({});
     } catch {}
+  };
+
+  const handleEditStep = (index: number) => {
+    if (!campaign) return;
+    const step = campaign.steps[index];
+    setStepForm({ subject: step.subject, body: step.body, delayDays: step.delayDays, useThreading: step.useThreading });
+    setEditingStepIndex(index);
+    setShowStepModal(true);
+  };
+
+  const handleDeleteStep = async (index: number) => {
+    if (!campaign || !window.confirm('Delete this step?')) return;
+    const remaining = campaign.steps.filter((_, i) => i !== index).map((s, i) => ({
+      subject: s.subject, body: s.body, delayDays: s.delayDays, useThreading: s.useThreading, stepOrder: i,
+    }));
+    try {
+      const updated = await apiRequest<ColdCampaignFull>(`/cold-email/campaigns/${id}/steps`, {
+        method: 'POST',
+        body: JSON.stringify({ steps: remaining }),
+      });
+      setCampaign(updated);
+    } catch {}
+  };
+
+  const handleTestSend = async () => {
+    if (!testEmail.trim()) return;
+    setTestSending(true);
+    setTestMessage('');
+    try {
+      await apiRequest(`/cold-email/campaigns/${id}/test-send`, {
+        method: 'POST',
+        body: JSON.stringify({ email: testEmail }),
+      });
+      setTestMessage('Test email sent!');
+      setTimeout(() => { setShowTestSend(false); setTestMessage(''); }, 2000);
+    } catch (err) {
+      setTestMessage(err instanceof Error ? err.message : 'Failed to send test');
+    } finally {
+      setTestSending(false);
+    }
   };
 
   const handleActivate = async () => {
@@ -180,8 +246,8 @@ export function ColdCampaignDetail() {
           <div className="relative bg-background rounded-2xl shadow-2xl w-full max-w-lg border border-border max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between px-6 py-4 border-b border-border sticky top-0 bg-background rounded-t-2xl z-10">
               <div>
-                <h2 className="text-base font-semibold text-foreground">Add Step</h2>
-                <p className="text-xs text-muted-foreground mt-0.5">Step {(campaign.steps?.length ?? 0) + 1} in the sequence</p>
+                <h2 className="text-base font-semibold text-foreground">{editingStepIndex !== null ? 'Edit Step' : 'Add Step'}</h2>
+                <p className="text-xs text-muted-foreground mt-0.5">{editingStepIndex !== null ? `Editing step ${editingStepIndex + 1}` : `Step ${(campaign.steps?.length ?? 0) + 1} in the sequence`}</p>
               </div>
               <button onClick={() => setShowStepModal(false)} className="p-1.5 rounded-md hover:bg-muted text-muted-foreground transition-colors">
                 <X className="h-4 w-4" />
@@ -222,7 +288,7 @@ export function ColdCampaignDetail() {
                 <Button type="button" variant="outline" size="sm" onClick={() => setShowStepModal(false)}>Cancel</Button>
                 <Button type="submit" size="sm">
                   <Plus className="h-3.5 w-3.5 mr-1.5" />
-                  Add Step
+                  {editingStepIndex !== null ? 'Save Changes' : 'Add Step'}
                 </Button>
               </div>
             </form>
@@ -336,12 +402,20 @@ export function ColdCampaignDetail() {
                           <span className="text-xs font-bold text-indigo-600">{step.stepNumber}</span>
                         </div>
                         <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <p className="text-sm font-semibold text-foreground">
-                              {step.subject || (step.useThreading ? 'RE: threading' : 'Follow-up')}
-                            </p>
-                            {step.useThreading && (
-                              <Badge variant="secondary" className="text-xs h-5 bg-sky-50 text-sky-700">Threaded</Badge>
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <p className="text-sm font-semibold text-foreground">
+                                {step.subject || (step.useThreading ? 'RE: threading' : 'Follow-up')}
+                              </p>
+                              {step.useThreading && (
+                                <Badge variant="secondary" className="text-xs h-5 bg-sky-50 text-sky-700">Threaded</Badge>
+                              )}
+                            </div>
+                            {campaign.status === 'draft' && (
+                              <div className="flex gap-1">
+                                <button type="button" onClick={() => handleEditStep(index)} className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground"><Pencil className="h-3.5 w-3.5" /></button>
+                                <button type="button" onClick={() => void handleDeleteStep(index)} className="p-1 rounded hover:bg-muted text-destructive"><Trash2 className="h-3.5 w-3.5" /></button>
+                              </div>
                             )}
                           </div>
                           <p className="text-xs text-muted-foreground mt-1 line-clamp-2">{step.body}</p>
@@ -462,6 +536,21 @@ export function ColdCampaignDetail() {
               <CardTitle className="text-base">Campaign Actions</CardTitle>
             </CardHeader>
             <CardContent className="space-y-2">
+              {campaign.steps?.length > 0 && (
+                <Button variant="outline" size="sm" className="w-full justify-start" onClick={() => setShowTestSend(!showTestSend)}>
+                  <TestTube className="h-4 w-4 mr-2" />
+                  Send Test Email
+                </Button>
+              )}
+              {showTestSend && (
+                <div className="space-y-2 p-3 rounded-lg border bg-muted/30">
+                  <Input placeholder="your@email.com" value={testEmail} onChange={(e) => setTestEmail(e.target.value)} className="h-8 text-sm" />
+                  <Button size="sm" className="w-full" onClick={() => void handleTestSend()} disabled={testSending}>
+                    {testSending ? 'Sending...' : 'Send Test'}
+                  </Button>
+                  {testMessage && <p className="text-xs text-center text-emerald-600">{testMessage}</p>}
+                </div>
+              )}
               {campaign.status === 'active' ? (
                 <Button variant="outline" size="sm" className="w-full justify-start" onClick={handlePause}>
                   <Pause className="h-4 w-4 mr-2" />

@@ -83,6 +83,9 @@ export function ColdMailboxes() {
   const [showModal, setShowModal] = useState(false);
   const [form, setForm] = useState({ ...defaultForm });
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [testingSmtp, setTestingSmtp] = useState(false);
+  const [smtpTestResult, setSmtpTestResult] = useState<string | null>(null);
 
   useEffect(() => { fetchData(); }, []);
 
@@ -121,15 +124,63 @@ export function ColdMailboxes() {
     const errs = validate();
     if (Object.keys(errs).length > 0) { setErrors(errs); return; }
     try {
-      const newMailbox = await apiRequest<Mailbox>('/cold-email/mailboxes', {
-        method: 'POST',
-        body: JSON.stringify(form),
-      });
-      setMailboxes(prev => [...prev, newMailbox]);
+      if (editingId) {
+        const updated = await apiRequest<Mailbox>(`/cold-email/mailboxes/${editingId}`, {
+          method: 'PATCH',
+          body: JSON.stringify(form),
+        });
+        setMailboxes(prev => prev.map(m => m.id === editingId ? updated : m));
+      } else {
+        const newMailbox = await apiRequest<Mailbox>('/cold-email/mailboxes', {
+          method: 'POST',
+          body: JSON.stringify(form),
+        });
+        setMailboxes(prev => [...prev, newMailbox]);
+      }
       setShowModal(false);
+      setEditingId(null);
       setForm({ ...defaultForm });
       setErrors({});
     } catch {}
+  };
+
+  const handleEdit = (mailbox: Mailbox) => {
+    setEditingId(mailbox.id);
+    setForm({
+      email: mailbox.email,
+      fromName: mailbox.fromName,
+      provider: mailbox.provider,
+      replyToEmail: mailbox.replyToEmail ?? '',
+      dailySendLimit: mailbox.dailySendLimit,
+      sendWindowStart: mailbox.sendWindowStart ?? '08:00',
+      sendWindowEnd: mailbox.sendWindowEnd ?? '17:00',
+      sendWeekdaysOnly: mailbox.sendWeekdaysOnly ?? false,
+      minDelaySeconds: mailbox.minDelaySeconds ?? 60,
+      maxDelaySeconds: mailbox.maxDelaySeconds ?? 180,
+      warmupEnabled: mailbox.warmupEnabled ?? false,
+      signature: mailbox.signature ?? '',
+      smtpHost: mailbox.smtpHost ?? '',
+      smtpPort: mailbox.smtpPort ?? 587,
+      smtpUser: mailbox.smtpUser ?? '',
+    });
+    setShowModal(true);
+  };
+
+  const handleTestSmtp = async () => {
+    if (!form.smtpHost.trim()) return;
+    setTestingSmtp(true);
+    setSmtpTestResult(null);
+    try {
+      const result = await apiRequest<{ success: boolean; banner?: string; error?: string }>('/cold-email/mailboxes/test-smtp', {
+        method: 'POST',
+        body: JSON.stringify({ host: form.smtpHost, port: form.smtpPort }),
+      });
+      setSmtpTestResult(result.success ? `Connected: ${result.banner ?? 'OK'}` : `Failed: ${result.error}`);
+    } catch (err) {
+      setSmtpTestResult(err instanceof Error ? err.message : 'Connection failed');
+    } finally {
+      setTestingSmtp(false);
+    }
   };
 
   const handleToggleWarmup = async (id: string) => {
@@ -276,14 +327,18 @@ export function ColdMailboxes() {
                     <Input id="mb-smtp-user" placeholder="username" value={form.smtpUser} onChange={e => set('smtpUser', e.target.value)} className={errors.smtpUser ? 'border-destructive' : ''} />
                     {errors.smtpUser && <p className="text-xs text-destructive">{errors.smtpUser}</p>}
                   </div>
+                  <Button type="button" variant="outline" size="sm" onClick={() => void handleTestSmtp()} disabled={testingSmtp || !form.smtpHost.trim()}>
+                    {testingSmtp ? 'Testing...' : 'Test Connection'}
+                  </Button>
+                  {smtpTestResult && <p className={`text-xs ${smtpTestResult.startsWith('Connected') ? 'text-emerald-600' : 'text-destructive'}`}>{smtpTestResult}</p>}
                 </>
               )}
 
               <div className="flex items-center justify-end gap-3 pt-2 border-t border-border mt-2">
-                <Button type="button" variant="outline" size="sm" onClick={() => setShowModal(false)}>Cancel</Button>
+                <Button type="button" variant="outline" size="sm" onClick={() => { setShowModal(false); setEditingId(null); }}>Cancel</Button>
                 <Button type="submit" size="sm">
                   <Plus className="h-3.5 w-3.5 mr-1.5" />
-                  Connect Mailbox
+                  {editingId ? 'Save Changes' : 'Connect Mailbox'}
                 </Button>
               </div>
             </form>
@@ -372,7 +427,7 @@ export function ColdMailboxes() {
                       </button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end">
-                      <DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => handleEdit(mailbox)}>
                         <Edit3 className="h-3.5 w-3.5 mr-2" />
                         Edit
                       </DropdownMenuItem>

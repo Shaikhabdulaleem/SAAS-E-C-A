@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Plus, Users, MoreHorizontal, X, List, CheckCircle, AlertCircle, AlertTriangle, ArrowLeft, Upload, Trash2 } from 'lucide-react';
+import { Plus, Users, MoreHorizontal, X, List, CheckCircle, AlertCircle, AlertTriangle, ArrowLeft, Upload, Trash2, Download } from 'lucide-react';
 import { Card, CardContent } from '../../components/ui/card';
 import { Button } from '../../components/ui/button';
 import { Badge } from '../../components/ui/badge';
@@ -104,6 +104,24 @@ export function ProspectLists() {
       await apiRequest(`/cold-email/prospect-lists/${listId}/prospects/${prospectId}`, { method: 'DELETE' });
       setProspects(prev => prev.filter(prospect => prospect.id !== prospectId));
       await fetchData();
+    } catch {}
+  };
+
+  const handleExportCsv = async (listId: string) => {
+    try {
+      const prospects = await apiRequest<Prospect[]>(`/cold-email/prospect-lists/${listId}/prospects`);
+      const header = 'email,firstName,lastName,company,jobTitle,status';
+      const rows = prospects.map(p => `${p.email},${p.firstName ?? ''},${p.lastName ?? ''},${p.companyName ?? ''},${p.jobTitle ?? ''},${p.validationStatus}`);
+      const csv = [header, ...rows].join('\n');
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `prospects-${listId}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
     } catch {}
   };
 
@@ -257,9 +275,25 @@ export function ProspectLists() {
             </div>
             <form onSubmit={handleAddProspects} className="px-6 py-5 space-y-4">
               <div className="space-y-1.5">
-                <Label className="text-sm">Bulk Entry</Label>
-                <p className="text-xs text-muted-foreground">Format: email, firstName, lastName, company, jobTitle</p>
-                <textarea rows={8} className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 font-mono" placeholder={"alex@example.com, Alex, Lee, Example Co, CEO\njane@example.org, Jane, Smith, Example Org, CTO"} value={bulkText} onChange={e => setBulkText(e.target.value)} />
+                <Label className="text-sm">Upload CSV File</Label>
+                <input type="file" accept=".csv,.txt" className="block w-full text-sm text-muted-foreground file:mr-4 file:py-1.5 file:px-3 file:rounded-md file:border file:border-input file:text-sm file:font-medium file:bg-background hover:file:bg-muted cursor-pointer" onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  const reader = new FileReader();
+                  reader.onload = (ev) => {
+                    const text = ev.target?.result as string;
+                    const lines = text.split('\n').filter(l => l.trim());
+                    const hasHeader = lines[0]?.toLowerCase().includes('email');
+                    const dataLines = hasHeader ? lines.slice(1) : lines;
+                    setBulkText(dataLines.join('\n'));
+                  };
+                  reader.readAsText(file);
+                }} />
+                <p className="text-xs text-muted-foreground">CSV with columns: email, firstName, lastName, company, jobTitle</p>
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-sm">Or Paste Manually</Label>
+                <textarea rows={6} className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 font-mono" placeholder={"alex@example.com, Alex, Lee, Example Co, CEO\njane@example.org, Jane, Smith, Example Org, CTO"} value={bulkText} onChange={e => setBulkText(e.target.value)} />
               </div>
               <div className="flex items-center justify-end gap-3 pt-2 border-t border-border mt-2">
                 <Button type="button" variant="outline" size="sm" onClick={() => setShowAddProspectsModal(null)}>Cancel</Button>
@@ -357,6 +391,10 @@ export function ProspectLists() {
                     <DropdownMenuItem onClick={() => setShowAddProspectsModal(list.id)}>
                       <Plus className="h-3.5 w-3.5 mr-2" />
                       Add Prospects
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => void handleExportCsv(list.id)}>
+                      <Download className="h-3.5 w-3.5 mr-2" />
+                      Export CSV
                     </DropdownMenuItem>
                     <Separator className="my-1" />
                     <DropdownMenuItem className="text-destructive" onClick={() => handleDeleteList(list.id)}>

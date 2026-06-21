@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { FileText, Plus, Search, Sparkles, Trash2, X } from 'lucide-react';
-import { useData, type EmailTemplate } from '../../contexts/DataContext';
+import { useData, type EmailContentBlock, type EmailTemplate } from '../../contexts/DataContext';
 import { apiRequest } from '../../lib/api';
 import { Button } from '../../components/ui/button';
 import { Card, CardContent } from '../../components/ui/card';
@@ -8,6 +8,7 @@ import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
 import { Textarea } from '../../components/ui/textarea';
 import { Badge } from '../../components/ui/badge';
+import { blocksToHtml, defaultEmailBlocks, EmailContentBuilder } from './EmailContentBuilder';
 
 const categories = ['promotional', 'newsletter', 'welcome', 'follow_up'];
 
@@ -16,6 +17,8 @@ function TemplateModal({ onClose, onSave, aiMode = false }: { onClose: () => voi
   const [category, setCategory] = useState('promotional');
   const [subject, setSubject] = useState('');
   const [body, setBody] = useState('');
+  const [blocks, setBlocks] = useState<EmailContentBlock[]>(defaultEmailBlocks());
+  const [mode, setMode] = useState<'blocks' | 'html'>('blocks');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
@@ -25,7 +28,7 @@ function TemplateModal({ onClose, onSave, aiMode = false }: { onClose: () => voi
     setError('');
     try {
       let finalSubject = subject.trim() || name.trim();
-      let finalBody = body.trim();
+      let finalBody = mode === 'blocks' ? blocksToHtml(blocks) : body.trim();
       if (aiMode) {
         const generated = await apiRequest<{ content: string }>('/ai/generate-email', {
           method: 'POST',
@@ -35,7 +38,7 @@ function TemplateModal({ onClose, onSave, aiMode = false }: { onClose: () => voi
         finalSubject = finalSubject || generated.content.match(/^Subject:\s*(.+)$/m)?.[1] || name.trim();
       }
       if (!finalBody) finalBody = 'Write your reusable email content here.';
-      onSave({ name: name.trim(), subject: finalSubject, body: finalBody, category });
+      onSave({ name: name.trim(), subject: finalSubject, body: finalBody, contentBlocks: mode === 'blocks' ? blocks : undefined, category });
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to save template');
@@ -74,10 +77,25 @@ function TemplateModal({ onClose, onSave, aiMode = false }: { onClose: () => voi
             <Label>Subject</Label>
             <Input value={subject} onChange={event => setSubject(event.target.value)} />
           </div>
-          <div className="space-y-1.5">
-            <Label>{aiMode ? 'Goal' : 'Body'}</Label>
-            <Textarea value={body} onChange={event => setBody(event.target.value)} className="min-h-[160px]" />
-          </div>
+          {aiMode ? (
+            <div className="space-y-1.5">
+              <Label>Goal</Label>
+              <Textarea value={body} onChange={event => setBody(event.target.value)} className="min-h-[160px]" />
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <Label>Template Content</Label>
+                <select value={mode} onChange={event => setMode(event.target.value as 'blocks' | 'html')} className="h-8 rounded-md border border-border bg-background px-2 text-xs">
+                  <option value="blocks">Blocks</option>
+                  <option value="html">HTML</option>
+                </select>
+              </div>
+              {mode === 'blocks'
+                ? <EmailContentBuilder blocks={blocks} onChange={setBlocks} />
+                : <Textarea value={body} onChange={event => setBody(event.target.value)} className="min-h-[160px]" />}
+            </div>
+          )}
           {error && <p className="text-sm text-destructive">{error}</p>}
         </div>
         <div className="flex justify-end gap-2 border-t border-border px-5 py-4">

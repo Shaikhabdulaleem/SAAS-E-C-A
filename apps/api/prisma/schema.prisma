@@ -538,6 +538,7 @@ model EmailTemplate {
   name        String
   subject     String
   body        String
+  contentBlocks Json?
   category    String?
   createdBy   String
   createdAt   DateTime @default(now())
@@ -560,6 +561,10 @@ model EmailCampaign {
   replyToEmail    String?
   body            String?
   bodyPlainText   String?
+  contentBlocks   Json?
+  abTestEnabled   Boolean          @default(false)
+  abVariants      Json?
+  selectedVariant String?
   status          CampaignStatus   @default(draft)
   scheduledAt     DateTime?
   scheduledTz     String?
@@ -1474,6 +1479,7 @@ model ColdCampaign {
   positiveReplyCount Int                 @default(0)
   bounceCount       Int                  @default(0)
   unsubCount        Int                  @default(0)
+  scheduledAt       DateTime?
   createdBy         String
   createdAt         DateTime             @default(now())
   updatedAt         DateTime             @updatedAt

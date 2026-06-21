@@ -61,6 +61,10 @@ export interface Campaign {
   replyToEmail?: string;
   body?: string;
   bodyPlainText?: string;
+  contentBlocks?: EmailContentBlock[];
+  abTestEnabled?: boolean;
+  abVariants?: EmailAbVariant[];
+  selectedVariant?: string;
   status: 'draft' | 'scheduled' | 'sending' | 'sent' | 'partial_failed' | 'cancelled';
   scheduledAt?: string;
   scheduledTz?: string;
@@ -97,8 +101,24 @@ export interface EmailTemplate {
   name: string;
   subject: string;
   body: string;
+  contentBlocks?: EmailContentBlock[];
   category?: string;
   createdAt: string;
+}
+
+export interface EmailContentBlock {
+  id: string;
+  type: 'text' | 'image' | 'button' | 'offer' | 'divider' | 'footer';
+  props: Record<string, string>;
+}
+
+export interface EmailAbVariant {
+  id: string;
+  label: string;
+  subject: string;
+  previewText?: string;
+  body: string;
+  contentBlocks?: EmailContentBlock[];
 }
 
 export interface Activity {
@@ -463,6 +483,7 @@ function normalizeCampaign(campaign: Campaign): Campaign {
     trackClicks: campaign.trackClicks ?? true,
     gdprConsent: campaign.gdprConsent ?? false,
     doubleOptIn: campaign.doubleOptIn ?? false,
+    abTestEnabled: campaign.abTestEnabled ?? false,
     createdAt: String(campaign.createdAt).split('T')[0],
     scheduledAt: campaign.scheduledAt ? String(campaign.scheduledAt) : undefined,
     sentAt: campaign.sentAt ? String(campaign.sentAt) : undefined,

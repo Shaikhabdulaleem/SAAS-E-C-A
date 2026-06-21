@@ -99,6 +99,7 @@ function buildNavGroups(user: User | null, activeServices: string[] = [], isImpe
       items: [
         { name: 'Campaigns', href: '/campaigns', icon: Mail },
         { name: 'Audience Setup', href: '/audience-setup', icon: Users },
+        { name: 'Domain Setup', href: '/domain-setup', icon: Globe },
         { name: 'Templates', href: '/templates', icon: FileText },
         { name: 'Suppressions', href: '/suppressions', icon: Ban },
       ],
@@ -317,6 +318,7 @@ export function MainLayout() {
     if (path.startsWith('/proposals')) return 'Proposals';
     if (path.startsWith('/finance')) return 'Finance';
     if (path.startsWith('/campaigns')) return 'Campaigns';
+    if (path.startsWith('/domain-setup')) return 'Domain Setup';
     if (path.startsWith('/templates')) return 'Templates';
     if (path.startsWith('/suppressions')) return 'Suppression List';
     if (path.startsWith('/cold-email/provider-connect')) return 'Connect Email Provider';

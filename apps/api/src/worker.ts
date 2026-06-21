@@ -109,15 +109,169 @@ async function processEmailCampaign(data: Record<string, unknown>) {
 }
 
 async function processColdSequenceTick(data: Record<string, unknown>) {
-  const campaignId = data.campaignId as string | undefined;
+  const campaignId = (data.campaignId ?? (data.payload as any)?.campaignId) as string | undefined;
   if (!campaignId) return { skipped: true };
-  const campaign = await prisma.coldCampaign.findUnique({ where: { id: campaignId } });
-  if (!campaign || campaign.status !== 'active') return { skipped: true, reason: 'campaign not active' };
-  const pendingStates = await prisma.coldSequenceState.findMany({
-    where: { campaignId, status: 'queued', nextSendAfter: { lte: new Date() } },
-    take: 100,
+  const campaign = await prisma.coldCampaign.findUnique({
+    where: { id: campaignId },
+    include: {
+      steps: { orderBy: { stepOrder: 'asc' } },
+      mailboxes: { include: { mailbox: true } },
+    },
   });
-  return { processed: true, pendingCount: pendingStates.length };
+  if (!campaign || campaign.status !== 'active') return { skipped: true, reason: 'campaign not active' };
+  if (campaign.steps.length === 0) return { skipped: true, reason: 'no steps' };
+
+  const pendingStates = await prisma.coldSequenceState.findMany({
+    where: {
+      campaignId,
+      status: { in: ['queued', 'active'] },
+      nextSendAfter: { lte: new Date() },
+    },
+    include: { prospect: true },
+    take: 50,
+  });
+  if (pendingStates.length === 0) return { processed: true, sent: 0 };
+
+  const suppressedEmails = new Set(
+    (await prisma.suppressionEntry.findMany({
+      where: { tenantId: campaign.tenantId ?? undefined },
+      select: { email: true },
+    })).map((s) => s.email.toLowerCase()),
+  );
+
+  const activeMailboxes = campaign.mailboxes
+    .map((m) => m.mailbox)
+    .filter((mb) => mb.status === 'active' && mb.sentToday < mb.dailySendLimit);
+
+  if (activeMailboxes.length === 0) return { processed: true, sent: 0, reason: 'no available mailboxes' };
+
+  const now = new Date();
+  const currentHour = now.getUTCHours();
+  const sendableMailboxes = activeMailboxes.filter((mb) => {
+    const start = parseInt(mb.sendWindowStart?.replace(':', '') ?? '0800', 10);
+    const end = parseInt(mb.sendWindowEnd?.replace(':', '') ?? '1700', 10);
+    const current = currentHour * 100;
+    return current >= start && current <= end;
+  });
+  if (sendableMailboxes.length === 0) return { processed: true, sent: 0, reason: 'outside send window' };
+
+  let mailboxIndex = 0;
+  let sent = 0;
+  let failed = 0;
+
+  for (const state of pendingStates) {
+    const prospect = state.prospect;
+    if (!prospect) continue;
+    if (suppressedEmails.has(prospect.email.toLowerCase())) {
+      await prisma.coldSequenceState.update({ where: { id: state.id }, data: { status: 'completed', completedAt: now } });
+      continue;
+    }
+    if (prospect.validationStatus === 'invalid') {
+      await prisma.coldSequenceState.update({ where: { id: state.id }, data: { status: 'completed', completedAt: now } });
+      continue;
+    }
+
+    const currentStep = campaign.steps.find((s) => s.id === state.currentStepId);
+    if (!currentStep) {
+      await prisma.coldSequenceState.update({ where: { id: state.id }, data: { status: 'completed', completedAt: now } });
+      continue;
+    }
+
+    const mailbox = sendableMailboxes[mailboxIndex % sendableMailboxes.length];
+    if (mailbox.sentToday >= mailbox.dailySendLimit) continue;
+    mailboxIndex++;
+
+    const renderTemplate = (text: string) =>
+      text
+        .replace(/\{\{firstName\}\}/g, prospect.firstName ?? '')
+        .replace(/\{\{first_name\}\}/g, prospect.firstName ?? '')
+        .replace(/\{\{lastName\}\}/g, prospect.lastName ?? '')
+        .replace(/\{\{last_name\}\}/g, prospect.lastName ?? '')
+        .replace(/\{\{company\}\}/g, prospect.companyName ?? '')
+        .replace(/\{\{jobTitle\}\}/g, prospect.jobTitle ?? '')
+        .replace(/\{\{job_title\}\}/g, prospect.jobTitle ?? '')
+        .replace(/\{\{email\}\}/g, prospect.email);
+
+    const subject = renderTemplate(currentStep.subject);
+    let body = renderTemplate(currentStep.body);
+    body = await withTracking(body, campaign.tenantId ?? '', campaignId, state.prospectId, prospect.email, campaign.trackOpens, campaign.trackClicks) ?? body;
+
+    try {
+      await sendViaSendGrid({
+        tenantId: campaign.tenantId ?? '',
+        campaignId,
+        recipientId: state.prospectId,
+        to: prospect.email,
+        fromEmail: mailbox.email,
+        fromName: mailbox.fromName ?? mailbox.email,
+        subject,
+        html: body,
+        replyTo: mailbox.replyToEmail,
+      });
+
+      await prisma.coldEmailEvent.create({
+        data: { campaignId, prospectId: state.prospectId, type: 'sent', stepOrder: currentStep.stepOrder, metadata: {} },
+      }).catch(() => undefined);
+
+      const persona = await prisma.persona.findFirst({ where: { mailboxId: mailbox.id } });
+      if (persona) {
+        await prisma.sendingLog.create({
+          data: { personaId: persona.id, mailboxId: mailbox.id, campaignId, prospectId: state.prospectId, sentAt: now, status: 'sent' },
+        }).catch(() => undefined);
+      }
+
+      const nextStep = campaign.steps.find((s) => s.stepOrder > currentStep.stepOrder);
+      if (nextStep) {
+        await prisma.coldSequenceState.update({
+          where: { id: state.id },
+          data: {
+            currentStepId: nextStep.id,
+            status: 'active',
+            lastSentAt: now,
+            nextSendAfter: new Date(now.getTime() + (nextStep.delayDays ?? 2) * 86400000),
+          },
+        });
+      } else {
+        await prisma.coldSequenceState.update({
+          where: { id: state.id },
+          data: { status: 'completed', lastSentAt: now, completedAt: now },
+        });
+      }
+
+      await prisma.coldMailbox.update({ where: { id: mailbox.id }, data: { sentToday: { increment: 1 }, totalSent: { increment: 1 } } });
+      mailbox.sentToday++;
+      await prisma.coldCampaign.update({ where: { id: campaignId }, data: { sentCount: { increment: 1 } } });
+      sent++;
+    } catch (error) {
+      failed++;
+      await prisma.providerLog.create({
+        data: {
+          tenantId: campaign.tenantId ?? '',
+          provider: 'sendgrid',
+          operation: 'cold_email_send',
+          status: 'failed',
+          request: { to: prospect.email, campaignId },
+          error: error instanceof Error ? error.message : String(error),
+        },
+      }).catch(() => undefined);
+    }
+
+    const delay = (mailbox.minDelaySeconds ?? 60) + Math.random() * ((mailbox.maxDelaySeconds ?? 180) - (mailbox.minDelaySeconds ?? 60));
+    await new Promise((r) => setTimeout(r, delay * 1000));
+  }
+
+  const remaining = await prisma.coldSequenceState.count({
+    where: { campaignId, status: { in: ['queued', 'active'] } },
+  });
+  if (remaining > 0) {
+    const queue = new (await import('bullmq')).Queue('cold-email-sequences', { connection: connection as never });
+    await queue.add('tick', { campaignId }, { delay: 180000 });
+    await queue.close();
+  } else {
+    await prisma.coldCampaign.update({ where: { id: campaignId }, data: { status: 'completed' } });
+  }
+
+  return { processed: true, sent, failed, remaining };
 }
 
 async function processNotification(data: Record<string, unknown>) {
@@ -135,9 +289,99 @@ async function processDnsCheck(data: Record<string, unknown>) {
   return { processed: true, domain: domain.domain };
 }
 
+async function processMailboxWarmup(data: Record<string, unknown>) {
+  const mailboxId = (data.mailboxId ?? (data.payload as any)?.mailboxId) as string | undefined;
+  if (!mailboxId) return { skipped: true };
+
+  const mailbox = await prisma.coldMailbox.findUnique({ where: { id: mailboxId } });
+  if (!mailbox || !mailbox.warmupEnabled || mailbox.warmupStatus !== 'warming' || mailbox.status !== 'active') {
+    return { skipped: true, reason: 'mailbox not eligible for warmup' };
+  }
+
+  const persona = await prisma.persona.findFirst({ where: { mailboxId } });
+  const warmupDay = persona?.warmupDay ?? 1;
+  const dailyTarget = warmupDay <= 7 ? 5 : warmupDay <= 14 ? 10 : warmupDay <= 21 ? 20 : warmupDay <= 28 ? 35 : 50;
+
+  const today = new Date();
+  today.setUTCHours(0, 0, 0, 0);
+  const todayLog = await prisma.warmupLog.findFirst({
+    where: { mailboxId, date: { gte: today } },
+  });
+  const sentToday = todayLog?.emailsSent ?? 0;
+
+  if (sentToday >= dailyTarget) {
+    if (persona && persona.warmupDay < 35) {
+      const nextDay = persona.warmupDay + 1;
+      const nextLimit = nextDay <= 7 ? 5 : nextDay <= 14 ? 10 : nextDay <= 21 ? 20 : nextDay <= 28 ? 35 : 50;
+      await prisma.persona.update({
+        where: { id: persona.id },
+        data: {
+          warmupDay: nextDay,
+          dailySendLimit: nextLimit,
+          warmupStatus: nextDay >= 35 ? 'ready' : 'warming',
+        },
+      });
+      if (nextDay >= 35) {
+        await prisma.coldMailbox.update({ where: { id: mailboxId }, data: { warmupStatus: 'ready', dailySendLimit: 50 } });
+      }
+    }
+    return { processed: true, action: 'daily_target_met', sentToday };
+  }
+
+  const warmupSubjects = ['Quick update', 'Following up', 'Checking in', 'Just a note', 'Brief hello', 'A thought', 'Quick question', 'Touching base'];
+  const warmupBodies = [
+    'Just wanted to check in and see how things are going. Let me know if you need anything.',
+    'Hope your week is going well. Looking forward to connecting soon.',
+    'Wanted to drop a quick note. Let me know if there is anything I can help with.',
+    'Just a brief hello to stay in touch. Hope all is well on your end.',
+  ];
+
+  try {
+    await sendViaSendGrid({
+      tenantId: mailbox.tenantId ?? '',
+      campaignId: `warmup-${mailboxId}`,
+      recipientId: mailboxId,
+      to: mailbox.email,
+      fromEmail: mailbox.email,
+      fromName: mailbox.fromName ?? mailbox.email,
+      subject: warmupSubjects[Math.floor(Math.random() * warmupSubjects.length)],
+      html: `<p>${warmupBodies[Math.floor(Math.random() * warmupBodies.length)]}</p>`,
+    });
+
+    if (todayLog) {
+      await prisma.warmupLog.update({ where: { id: todayLog.id }, data: { emailsSent: { increment: 1 } } });
+    } else {
+      await prisma.warmupLog.create({
+        data: { personaId: persona?.id ?? mailboxId, mailboxId, date: today, emailsSent: 1, emailsReceived: 0, repliesReceived: 0, spamCount: 0, bounceCount: 0 },
+      });
+    }
+
+    await prisma.coldMailbox.update({ where: { id: mailboxId }, data: { sentToday: { increment: 1 }, totalSent: { increment: 1 } } });
+  } catch (error) {
+    await prisma.providerLog.create({
+      data: {
+        tenantId: mailbox.tenantId ?? '',
+        provider: 'sendgrid',
+        operation: 'warmup_email',
+        status: 'failed',
+        request: { mailboxId, email: mailbox.email },
+        error: error instanceof Error ? error.message : String(error),
+      },
+    }).catch(() => undefined);
+  }
+
+  const delayMs = (1800 + Math.random() * 1800) * 1000;
+  const queue = new (await import('bullmq')).Queue('mailbox-warmup', { connection: connection as never });
+  await queue.add('warmup', { mailboxId, tenantId: mailbox.tenantId }, { delay: delayMs });
+  await queue.close();
+
+  return { processed: true, sent: sentToday + 1, target: dailyTarget };
+}
+
 const handlers: Record<string, (data: Record<string, unknown>) => Promise<Record<string, unknown>>> = {
   'email-campaigns': processEmailCampaign,
   'cold-email-sequences': processColdSequenceTick,
+  'mailbox-warmup': processMailboxWarmup,
   'notifications': processNotification,
   'dns-checks': processDnsCheck,
 };

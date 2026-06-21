@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link, useNavigate } from 'react-router';
 import { useData } from '../../contexts/DataContext';
-import { ArrowLeft, Mail, Eye, MousePointerClick, Users, Calendar, AlertCircle } from 'lucide-react';
+import { ArrowLeft, Mail, Eye, MousePointerClick, Users, Calendar, AlertCircle, CheckCircle, Send, Copy } from 'lucide-react';
 import { apiRequest } from '../../lib/api';
 
 type Recipient = {
@@ -28,12 +28,24 @@ type CampaignAnalytics = {
   clickRate: number;
 };
 
+type CampaignReadiness = {
+  ready: boolean;
+  checklist: Array<{ key: string; label: string; passed: boolean; blocking: boolean }>;
+  blockingErrors: string[];
+  warnings: string[];
+  recipients: { total: number; suppressed: number; allowed: number };
+  domain: { domain: string } | null;
+};
+
 export function CampaignDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { campaigns, addCampaign, deleteCampaign, sendCampaignNow, refreshData } = useData();
   const [recipients, setRecipients] = useState<Recipient[]>([]);
   const [analytics, setAnalytics] = useState<CampaignAnalytics | null>(null);
+  const [readiness, setReadiness] = useState<CampaignReadiness | null>(null);
+  const [testEmail, setTestEmail] = useState('');
+  const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   
   const campaign = campaigns.find(c => c.id === id);
@@ -43,10 +55,12 @@ export function CampaignDetail() {
     Promise.all([
       apiRequest<Recipient[]>(`/email/campaigns/${id}/recipients`),
       apiRequest<CampaignAnalytics>(`/email/campaigns/${id}/analytics`),
+      apiRequest<CampaignReadiness>(`/email/campaigns/${id}/readiness`),
     ])
-      .then(([recipientData, analyticsData]) => {
+      .then(([recipientData, analyticsData, readinessData]) => {
         setRecipients(recipientData);
         setAnalytics(analyticsData);
+        setReadiness(readinessData);
         setError('');
       })
       .catch(err => setError(err instanceof Error ? err.message : 'Unable to load campaign report'));
@@ -97,6 +111,28 @@ export function CampaignDetail() {
       companyAddress: campaign.companyAddress,
       recipientFilter: campaign.recipientFilter,
     });
+  };
+
+  const sendTest = async () => {
+    if (!id || !testEmail.trim()) return;
+    try {
+      await apiRequest(`/email/campaigns/${id}/send-test`, { method: 'POST', body: JSON.stringify({ to: testEmail.trim() }) });
+      setNotice(`Test email sent to ${testEmail.trim()}`);
+      setError('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to send test email');
+    }
+  };
+
+  const createFollowUp = async (segment: 'openers' | 'clickers' | 'non_openers') => {
+    if (!id) return;
+    try {
+      await apiRequest(`/email/campaigns/${id}/follow-up`, { method: 'POST', body: JSON.stringify({ segment }) });
+      await refreshData();
+      setNotice(`Follow-up draft created for ${segment.replace('_', ' ')}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to create follow-up campaign');
+    }
   };
 
   return (
@@ -186,7 +222,34 @@ export function CampaignDetail() {
                 <span>{campaign.lastError || 'Some recipients failed. Review the recipient table below.'}</span>
               </div>
             )}
+
+            {notice && (
+              <div className="p-4 border-t border-emerald-100 bg-emerald-50 text-sm text-emerald-800 flex gap-2">
+                <CheckCircle className="h-4 w-4 mt-0.5" />
+                <span>{notice}</span>
+              </div>
+            )}
           </div>
+
+          {readiness && (
+            <div className="bg-white rounded-lg shadow">
+              <div className="p-6 border-b border-gray-200">
+                <h2 className="text-lg font-semibold text-gray-900">Review & Send Readiness</h2>
+                <p className="text-sm text-gray-600 mt-1">{readiness.ready ? 'This campaign is ready to send.' : 'Resolve blocking items before sending.'}</p>
+              </div>
+              <div className="p-6 grid gap-3 md:grid-cols-2">
+                {readiness.checklist.map(item => (
+                  <div key={item.key} className="flex items-center justify-between rounded-lg border border-gray-200 p-3 text-sm">
+                    <span className="flex items-center gap-2">
+                      {item.passed ? <CheckCircle className="h-4 w-4 text-emerald-600" /> : <AlertCircle className="h-4 w-4 text-amber-600" />}
+                      {item.label}
+                    </span>
+                    {!item.passed && item.blocking && <span className="text-xs text-amber-700">Required</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Email Preview */}
           <div className="bg-white rounded-lg shadow">
@@ -215,6 +278,26 @@ export function CampaignDetail() {
                     </div>
                   </div>
                 </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-lg shadow">
+            <div className="p-6 border-b border-gray-200">
+              <h2 className="text-lg font-semibold text-gray-900">Test & Follow-Up</h2>
+            </div>
+            <div className="p-6 space-y-4">
+              <div className="flex gap-2">
+                <input className="h-10 flex-1 rounded-md border border-gray-300 px-3 text-sm" placeholder="test@example.com" value={testEmail} onChange={event => setTestEmail(event.target.value)} />
+                <button className="inline-flex items-center gap-2 rounded-md bg-indigo-600 px-4 text-sm font-medium text-white" onClick={sendTest}>
+                  <Send className="h-4 w-4" />
+                  Send Test
+                </button>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-3">
+                <button className="inline-flex items-center justify-center gap-2 rounded-md border border-gray-300 px-3 py-2 text-sm" onClick={() => createFollowUp('openers')}><Copy className="h-4 w-4" /> Openers</button>
+                <button className="inline-flex items-center justify-center gap-2 rounded-md border border-gray-300 px-3 py-2 text-sm" onClick={() => createFollowUp('clickers')}><Copy className="h-4 w-4" /> Clickers</button>
+                <button className="inline-flex items-center justify-center gap-2 rounded-md border border-gray-300 px-3 py-2 text-sm" onClick={() => createFollowUp('non_openers')}><Copy className="h-4 w-4" /> Non-openers</button>
               </div>
             </div>
           </div>

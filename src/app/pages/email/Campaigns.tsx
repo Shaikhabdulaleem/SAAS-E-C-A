@@ -1,7 +1,7 @@
-import { useMemo, useState } from 'react';
-import { useData } from '../../contexts/DataContext';
+import { useEffect, useMemo, useState } from 'react';
+import { useData, type EmailAbVariant, type EmailContentBlock } from '../../contexts/DataContext';
 import { Link } from 'react-router';
-import { Plus, Mail, Eye, MousePointerClick, Send, Clock, CheckCircle, BarChart2, MoreHorizontal, X, ShieldCheck, Users, Upload } from 'lucide-react';
+import { Plus, Mail, Eye, MousePointerClick, Send, Clock, CheckCircle, BarChart2, MoreHorizontal, X, ShieldCheck, Users, Upload, Globe, AlertCircle } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../../components/ui/card';
 import { Button } from '../../components/ui/button';
 import { Badge } from '../../components/ui/badge';
@@ -14,6 +14,17 @@ import { Label } from '../../components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select';
 import { Switch } from '../../components/ui/switch';
 import { Textarea } from '../../components/ui/textarea';
+import { apiRequest } from '../../lib/api';
+import { blocksToHtml, defaultEmailBlocks, EmailContentBuilder } from './EmailContentBuilder';
+
+type DomainSummary = {
+  id: string;
+  domain: string;
+  spfStatus: string;
+  dkimStatus: string;
+  dmarcStatus: string;
+  mxStatus: string;
+};
 
 const statusConfig: Record<string, { label: string; className: string; icon: React.ElementType }> = {
   draft: { label: 'Draft', className: 'bg-muted text-muted-foreground', icon: Clock },
@@ -28,6 +39,8 @@ export function Campaigns() {
   const { campaigns, contacts, companies, addCampaign, deleteCampaign, sendCampaignNow, apiError } = useData();
   const [filter, setFilter] = useState('all');
   const [showModal, setShowModal] = useState(false);
+  const [domains, setDomains] = useState<DomainSummary[]>([]);
+  const [builderMode, setBuilderMode] = useState<'blocks' | 'html'>('blocks');
   const [form, setForm] = useState({
     name: '',
     subject: '',
@@ -36,6 +49,12 @@ export function Campaigns() {
     fromEmail: '',
     replyToEmail: '',
     body: '',
+    contentBlocks: defaultEmailBlocks() as EmailContentBlock[],
+    abTestEnabled: false,
+    selectedVariant: 'a',
+    variantBSubject: '',
+    variantBPreviewText: '',
+    variantBBody: '',
     status: 'draft' as 'draft' | 'scheduled',
     scheduledAt: '',
     trackOpens: true,
@@ -67,6 +86,25 @@ export function Campaigns() {
     if (recipientFilter.companyId && contact.companyId !== recipientFilter.companyId) return false;
     return true;
   }).length, [contacts, recipientFilter]);
+  const bodyHtml = builderMode === 'blocks' ? blocksToHtml(form.contentBlocks) : form.body;
+  const senderDomainName = form.fromEmail.split('@')[1]?.toLowerCase() ?? '';
+  const senderDomain = domains.find(domain => domain.domain === senderDomainName);
+  const senderDomainVerified = !!senderDomain && [senderDomain.spfStatus, senderDomain.dkimStatus, senderDomain.dmarcStatus, senderDomain.mxStatus].every(status => status === 'verified');
+  const reviewItems = [
+    { label: 'Audience has opted-in recipients', passed: estimatedRecipients > 0, action: '/audience-setup' },
+    { label: 'Sender domain is added', passed: !!senderDomain, action: '/domain-setup' },
+    { label: 'Sender domain DNS is verified', passed: senderDomainVerified, action: '/domain-setup' },
+    { label: 'Campaign content is ready', passed: !!bodyHtml.trim(), action: null },
+    { label: 'Company address is present', passed: !!form.companyAddress.trim(), action: null },
+    { label: 'Compliance consent is confirmed', passed: form.gdprConsent, action: null },
+    { label: 'Unsubscribe footer will be added automatically', passed: true, action: null },
+  ];
+
+  useEffect(() => {
+    apiRequest<DomainSummary[]>('/email/domains')
+      .then(setDomains)
+      .catch(() => setDomains([]));
+  }, []);
 
   const totalSent = campaigns.filter(c => c.status === 'sent').reduce((sum, c) => sum + c.totalRecipients, 0);
   const totalOpens = campaigns.filter(c => c.status === 'sent').reduce((sum, c) => sum + c.openCount, 0);
@@ -88,7 +126,7 @@ export function Campaigns() {
     if (!form.subject.trim()) e.subject = 'Subject line is required';
     if (!form.fromName.trim()) e.fromName = 'Sender name is required';
     if (!form.fromEmail.trim()) e.fromEmail = 'Sender email is required';
-    if (!form.body.trim()) e.body = 'Email body is required';
+    if (!bodyHtml.trim()) e.body = 'Email body is required';
     if (form.status === 'scheduled' && !form.scheduledAt) e.scheduledAt = 'Schedule date is required';
     return e;
   };
@@ -97,6 +135,10 @@ export function Campaigns() {
     e.preventDefault();
     const errs = validate();
     if (Object.keys(errs).length > 0) { setErrors(errs); return; }
+    const abVariants: EmailAbVariant[] | undefined = form.abTestEnabled ? [
+      { id: 'a', label: 'Variant A', subject: form.subject.trim(), previewText: form.previewText.trim() || undefined, body: bodyHtml, contentBlocks: form.contentBlocks },
+      { id: 'b', label: 'Variant B', subject: form.variantBSubject.trim() || form.subject.trim(), previewText: form.variantBPreviewText.trim() || undefined, body: form.variantBBody.trim() || bodyHtml },
+    ] : undefined;
     addCampaign({
       name: form.name.trim(),
       subject: form.subject.trim(),
@@ -104,8 +146,12 @@ export function Campaigns() {
       fromName: form.fromName.trim(),
       fromEmail: form.fromEmail.trim(),
       replyToEmail: form.replyToEmail.trim() || undefined,
-      body: form.body.trim(),
-      bodyPlainText: form.body.trim().replace(/<[^>]+>/g, ' '),
+      body: bodyHtml.trim(),
+      bodyPlainText: bodyHtml.trim().replace(/<[^>]+>/g, ' '),
+      contentBlocks: form.contentBlocks,
+      abTestEnabled: form.abTestEnabled,
+      abVariants,
+      selectedVariant: form.abTestEnabled ? form.selectedVariant : undefined,
       status: form.status,
       scheduledAt: form.status === 'scheduled' ? form.scheduledAt : undefined,
       totalRecipients: 0,
@@ -121,7 +167,7 @@ export function Campaigns() {
       recipientFilter,
     });
     setShowModal(false);
-    setForm({ name: '', subject: '', previewText: '', fromName: '', fromEmail: '', replyToEmail: '', body: '', status: 'draft', scheduledAt: '', trackOpens: true, trackClicks: true, gdprConsent: false, doubleOptIn: false, companyAddress: '', audienceType: 'customers', tag: 'all', companyId: 'all' });
+    setForm({ name: '', subject: '', previewText: '', fromName: '', fromEmail: '', replyToEmail: '', body: '', contentBlocks: defaultEmailBlocks(), abTestEnabled: false, selectedVariant: 'a', variantBSubject: '', variantBPreviewText: '', variantBBody: '', status: 'draft', scheduledAt: '', trackOpens: true, trackClicks: true, gdprConsent: false, doubleOptIn: false, companyAddress: '', audienceType: 'customers', tag: 'all', companyId: 'all' });
     setErrors({});
   };
 
@@ -142,7 +188,7 @@ export function Campaigns() {
       {showModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowModal(false)} />
-          <div className="relative bg-background rounded-2xl shadow-2xl w-full max-w-lg border border-border">
+          <div className="relative bg-background rounded-2xl shadow-2xl w-full max-w-3xl border border-border max-h-[92vh] overflow-y-auto">
             <div className="flex items-center justify-between px-6 py-4 border-b border-border">
               <div>
                 <h2 className="text-base font-semibold text-foreground">New Campaign</h2>
@@ -225,16 +271,75 @@ export function Campaigns() {
                 />
               </div>
 
-              <div className="space-y-1.5">
-                <Label htmlFor="camp-body" className="text-sm">Email Body</Label>
-                <Textarea
-                  id="camp-body"
-                  placeholder="Write the email content. HTML links will be tracked when click tracking is enabled."
-                  value={form.body}
-                  onChange={e => set('body', e.target.value)}
-                  className={errors.body ? 'border-destructive min-h-[120px]' : 'min-h-[120px]'}
-                />
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <Label className="text-sm">Email Builder</Label>
+                  <Tabs value={builderMode} onValueChange={(value) => setBuilderMode(value as 'blocks' | 'html')}>
+                    <TabsList className="h-8">
+                      <TabsTrigger value="blocks" className="text-xs">Blocks</TabsTrigger>
+                      <TabsTrigger value="html" className="text-xs">HTML</TabsTrigger>
+                    </TabsList>
+                  </Tabs>
+                </div>
+                {builderMode === 'blocks' ? (
+                  <EmailContentBuilder blocks={form.contentBlocks} onChange={blocks => setForm(f => ({ ...f, contentBlocks: blocks }))} />
+                ) : (
+                  <Textarea
+                    placeholder="Write the email content. HTML links will be tracked when click tracking is enabled."
+                    value={form.body}
+                    onChange={e => set('body', e.target.value)}
+                    className={errors.body ? 'border-destructive min-h-[160px]' : 'min-h-[160px]'}
+                  />
+                )}
                 {errors.body && <p className="text-xs text-destructive">{errors.body}</p>}
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="rounded-lg border border-border p-3">
+                    <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Desktop Preview</p>
+                    <div className="rounded border border-border bg-white p-4 text-sm" dangerouslySetInnerHTML={{ __html: bodyHtml || '<p>No content yet.</p>' }} />
+                  </div>
+                  <div className="rounded-lg border border-border p-3">
+                    <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Mobile Preview</p>
+                    <div className="mx-auto max-w-[260px] rounded-xl border border-border bg-white p-3 text-sm" dangerouslySetInnerHTML={{ __html: bodyHtml || '<p>No content yet.</p>' }} />
+                  </div>
+                </div>
+              </div>
+
+              <Separator />
+
+              <div className="space-y-3">
+                <div className="flex items-center justify-between rounded-lg border border-border p-3">
+                  <div>
+                    <Label className="text-sm">A/B Test</Label>
+                    <p className="text-xs text-muted-foreground">Test an alternate subject, preview text, or body for this draft.</p>
+                  </div>
+                  <Switch checked={form.abTestEnabled} onCheckedChange={v => setForm(f => ({ ...f, abTestEnabled: v }))} />
+                </div>
+                {form.abTestEnabled && (
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <div className="space-y-1.5">
+                      <Label className="text-sm">Selected Variant</Label>
+                      <Select value={form.selectedVariant} onValueChange={v => setForm(f => ({ ...f, selectedVariant: v }))}>
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="a">Variant A</SelectItem>
+                          <SelectItem value="b">Variant B</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-sm">Variant B Subject</Label>
+                      <Input value={form.variantBSubject} onChange={e => set('variantBSubject', e.target.value)} placeholder="Alternate subject line" />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-sm">Variant B Preview Text</Label>
+                      <Input value={form.variantBPreviewText} onChange={e => set('variantBPreviewText', e.target.value)} placeholder="Alternate inbox preview" />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-sm">Variant B Body</Label>
+                      <Textarea value={form.variantBBody} onChange={e => set('variantBBody', e.target.value)} placeholder="Optional alternate HTML/body" />
+                    </div>
+                  </div>
+                )}
               </div>
 
               <Separator />
@@ -325,6 +430,33 @@ export function Campaigns() {
 
               <Separator />
 
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Review & Send Checklist</p>
+                  <Badge variant="secondary" className={reviewItems.every(item => item.passed) ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}>
+                    {reviewItems.filter(item => item.passed).length}/{reviewItems.length}
+                  </Badge>
+                </div>
+                <div className="grid gap-2 md:grid-cols-2">
+                  {reviewItems.map(item => (
+                    <div key={item.label} className="flex items-center justify-between rounded-lg border border-border p-2 text-xs">
+                      <span className="flex items-center gap-2">
+                        {item.passed ? <CheckCircle className="h-3.5 w-3.5 text-emerald-600" /> : <AlertCircle className="h-3.5 w-3.5 text-amber-600" />}
+                        {item.label}
+                      </span>
+                      {!item.passed && item.action && <Link to={item.action} className="text-primary hover:underline">Fix</Link>}
+                    </div>
+                  ))}
+                </div>
+                {form.fromEmail && !senderDomainVerified && (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                    The sender domain must be added and fully verified before sending or scheduling.
+                  </div>
+                )}
+              </div>
+
+              <Separator />
+
               <div className="space-y-1.5">
                 <Label className="text-sm">Status</Label>
                 <Select value={form.status} onValueChange={v => set('status', v)}>
@@ -379,6 +511,12 @@ export function Campaigns() {
               Audience Setup
             </Link>
           </Button>
+          <Button size="sm" variant="outline" asChild>
+            <Link to="/domain-setup">
+              <Globe className="h-4 w-4 mr-1.5" />
+              Domain Setup
+            </Link>
+          </Button>
           <Button size="sm" onClick={() => setShowModal(true)}>
             <Plus className="h-4 w-4 mr-1.5" />
             New Campaign
@@ -402,6 +540,27 @@ export function Campaigns() {
             </div>
             <Button size="sm" asChild>
               <Link to="/audience-setup">Set Up Audience</Link>
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
+      {domains.filter(domain => [domain.spfStatus, domain.dkimStatus, domain.dmarcStatus, domain.mxStatus].every(status => status === 'verified')).length === 0 && (
+        <Card>
+          <CardContent className="p-6 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 rounded-xl bg-amber-50">
+                <Globe className="h-5 w-5 text-amber-600" />
+              </div>
+              <div>
+                <h2 className="text-base font-semibold text-foreground">Verify a sending domain before sending</h2>
+                <p className="text-sm text-muted-foreground mt-1">
+                  Add SPF, DKIM, DMARC, and MX records for the domain used in your sender email.
+                </p>
+              </div>
+            </div>
+            <Button size="sm" asChild variant="outline">
+              <Link to="/domain-setup">Set Up Domain</Link>
             </Button>
           </CardContent>
         </Card>

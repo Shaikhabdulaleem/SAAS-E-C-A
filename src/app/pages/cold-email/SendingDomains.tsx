@@ -67,9 +67,12 @@ export function SendingDomains() {
   const [domains, setDomains] = useState<SendingDomain[]>([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
+  const [bulkMode, setBulkMode] = useState(false);
   const [newDomain, setNewDomain] = useState('');
+  const [bulkDomains, setBulkDomains] = useState('');
   const [error, setError] = useState('');
   const [verifying, setVerifying] = useState<string | null>(null);
+  const [verifyingAll, setVerifyingAll] = useState(false);
   const [editingDomain, setEditingDomain] = useState<SendingDomain | null>(null);
   const [dnsForm, setDnsForm] = useState(emptyDnsForm);
   const [savingDns, setSavingDns] = useState(false);
@@ -87,6 +90,24 @@ export function SendingDomains() {
   useEffect(() => { fetchDomains(); }, []);
 
   const handleAdd = async () => {
+    if (bulkMode) {
+      const lines = bulkDomains.split('\n').map(l => l.trim()).filter(Boolean);
+      if (lines.length === 0) { setError('Enter at least one domain'); return; }
+      try {
+        const result = await apiRequest<{ created: number; duplicates: number }>('/cold-email/domains/bulk', {
+          method: 'POST',
+          body: JSON.stringify({ domains: lines }),
+        });
+        setShowModal(false);
+        setBulkDomains('');
+        setBulkMode(false);
+        setError('');
+        await fetchDomains();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to add domains');
+      }
+      return;
+    }
     if (!newDomain.trim()) { setError('Domain is required'); return; }
     try {
       const domain = await apiRequest<SendingDomain>('/cold-email/domains', {
@@ -100,6 +121,21 @@ export function SendingDomains() {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to add domain');
     }
+  };
+
+  const handleVerifyAll = async () => {
+    const unverified = domains.filter(d => !allVerified(d));
+    if (unverified.length === 0) return;
+    setVerifyingAll(true);
+    const results = await Promise.allSettled(
+      unverified.map(d => apiRequest<SendingDomain>(`/cold-email/domains/${d.id}/verify`, { method: 'POST' }))
+    );
+    results.forEach((r, i) => {
+      if (r.status === 'fulfilled') {
+        setDomains(prev => prev.map(d => d.id === unverified[i].id ? r.value : d));
+      }
+    });
+    setVerifyingAll(false);
   };
 
   const handleVerify = async (domainId: string) => {
@@ -172,14 +208,33 @@ export function SendingDomains() {
               </button>
             </div>
             <div className="px-6 py-5 space-y-4">
+              <div className="flex items-center gap-2 mb-2">
+                <button type="button" onClick={() => setBulkMode(false)} className={`text-xs px-2 py-1 rounded ${!bulkMode ? 'bg-primary text-white' : 'bg-muted text-muted-foreground'}`}>Single</button>
+                <button type="button" onClick={() => setBulkMode(true)} className={`text-xs px-2 py-1 rounded ${bulkMode ? 'bg-primary text-white' : 'bg-muted text-muted-foreground'}`}>Bulk Import</button>
+              </div>
               <div className="space-y-1.5">
-                <Label className="text-sm">Domain</Label>
-                <Input
-                  placeholder="e.g. company.com"
-                  value={newDomain}
-                  onChange={e => { setNewDomain(e.target.value); setError(''); }}
-                  className={error ? 'border-destructive' : ''}
-                />
+                {bulkMode ? (
+                  <>
+                    <Label className="text-sm">Domains (one per line)</Label>
+                    <textarea
+                      rows={8}
+                      placeholder={"company1.com\ncompany2.io\ncompany3.net"}
+                      value={bulkDomains}
+                      onChange={e => { setBulkDomains(e.target.value); setError(''); }}
+                      className={`w-full rounded-md border bg-background px-3 py-2 text-sm ${error ? 'border-destructive' : 'border-input'}`}
+                    />
+                  </>
+                ) : (
+                  <>
+                    <Label className="text-sm">Domain</Label>
+                    <Input
+                      placeholder="e.g. company.com"
+                      value={newDomain}
+                      onChange={e => { setNewDomain(e.target.value); setError(''); }}
+                      className={error ? 'border-destructive' : ''}
+                    />
+                  </>
+                )}
                 {error && <p className="text-xs text-destructive">{error}</p>}
                 <p className="text-xs text-muted-foreground">
                   After adding, you'll need to set up SPF, DKIM, and DMARC records with your DNS provider.
@@ -261,10 +316,18 @@ export function SendingDomains() {
           <h1 className="text-foreground">Sending Domains</h1>
           <p className="text-sm text-muted-foreground mt-0.5">Manage DNS authentication for your cold email domains</p>
         </div>
-        <Button size="sm" onClick={() => setShowModal(true)}>
-          <Plus className="h-4 w-4 mr-1.5" />
-          Add Domain
-        </Button>
+        <div className="flex gap-2">
+          {needsAttention > 0 && (
+            <Button size="sm" variant="outline" onClick={() => void handleVerifyAll()} disabled={verifyingAll}>
+              <RefreshCw className={`h-4 w-4 mr-1.5 ${verifyingAll ? 'animate-spin' : ''}`} />
+              {verifyingAll ? 'Verifying...' : 'Verify All'}
+            </Button>
+          )}
+          <Button size="sm" onClick={() => setShowModal(true)}>
+            <Plus className="h-4 w-4 mr-1.5" />
+            Add Domain
+          </Button>
+        </div>
       </div>
 
       <div className="grid grid-cols-3 gap-3">
