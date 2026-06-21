@@ -159,6 +159,22 @@ async function processColdSequenceTick(data: Record<string, unknown>) {
   let sent = 0;
   let failed = 0;
 
+  // Smart throttle: check campaign bounce rate, auto-pause if too high
+  if (campaign.sentCount > 20) {
+    const bounceRate = (campaign.bounceCount / campaign.sentCount) * 100;
+    if (bounceRate > 5) {
+      await prisma.coldCampaign.update({ where: { id: campaignId }, data: { status: 'paused' } });
+      if (campaign.tenantId) {
+        await prisma.notification.create({
+          data: { tenantId: campaign.tenantId, type: 'system', title: 'Campaign Auto-Paused',
+            body: `"${campaign.name}" paused — bounce rate ${bounceRate.toFixed(1)}% exceeds 5% threshold. Review your prospect list quality.`,
+            metadata: { campaignId, bounceRate } },
+        }).catch(() => undefined);
+      }
+      return { processed: true, sent: 0, reason: 'auto-paused due to high bounce rate' };
+    }
+  }
+
   for (const state of pendingStates) {
     const prospect = state.prospect;
     if (!prospect) continue;
@@ -909,7 +925,45 @@ async function processSystemCron(_data: Record<string, unknown>) {
     results.healthChecked = domains.length;
   }
 
-  // 5. Auto-pause stale draft campaigns (> 30 days)
+  // 5. Domain intelligence: age caps, auto-pause on low health, auto-recovery
+  if (hour === 2) {
+    const allDomains = await prisma.sendingDomain.findMany({ where: { purchasedAt: { not: null } } });
+    for (const domain of allDomains) {
+      // Young domain cap: limit daily sending for domains < 30 days old
+      if (domain.purchasedAt) {
+        const ageMs = now.getTime() - new Date(domain.purchasedAt).getTime();
+        const ageDays = Math.floor(ageMs / 86400000);
+        if (ageDays < 30 && domain.currentDailyCap !== 20) {
+          await prisma.sendingDomain.update({ where: { id: domain.id }, data: { currentDailyCap: 20 } });
+        } else if (ageDays >= 30 && domain.currentDailyCap === 20) {
+          await prisma.sendingDomain.update({ where: { id: domain.id }, data: { currentDailyCap: 50 } });
+        }
+      }
+      // Auto-pause domain with health < 70
+      if (domain.healthScore < 70 && domain.tenantId) {
+        await prisma.coldMailbox.updateMany({ where: { domainId: domain.id, status: 'active' }, data: { status: 'paused' } });
+        await prisma.notification.create({
+          data: { tenantId: domain.tenantId, type: 'domain_unhealthy', title: 'Domain Health Critical',
+            body: `${domain.domain} health score dropped to ${domain.healthScore}. Mailboxes paused.`,
+            metadata: { domainId: domain.id, healthScore: domain.healthScore } },
+        }).catch(() => undefined);
+      }
+    }
+    // Auto-recovery: restart warmup for mailboxes paused > 7 days with improved rates
+    const pausedMailboxes = await prisma.coldMailbox.findMany({ where: { status: 'paused', updatedAt: { lt: new Date(now.getTime() - 7 * 86400000) } } });
+    for (const mb of pausedMailboxes) {
+      if (Number(mb.bounceRate) < 3) {
+        await prisma.coldMailbox.update({ where: { id: mb.id }, data: { status: 'active', warmupStatus: 'warming', warmupEnabled: true, dailySendLimit: 5 } });
+        const persona = await prisma.persona.findFirst({ where: { mailboxId: mb.id } });
+        if (persona) {
+          await prisma.persona.update({ where: { id: persona.id }, data: { warmupStatus: 'warming', warmupDay: 1, dailySendLimit: 5 } });
+        }
+      }
+    }
+    results.domainIntelligence = { domainsChecked: allDomains.length, recovered: pausedMailboxes.filter(mb => Number(mb.bounceRate) < 3).length };
+  }
+
+  // 6. Auto-pause stale draft campaigns (> 30 days)
   if (hour === 3) {
     const staleDate = new Date(now.getTime() - 30 * 86400000);
     const staleCampaigns = await prisma.coldCampaign.findMany({ where: { status: 'draft', createdAt: { lt: staleDate } } });

@@ -125,6 +125,7 @@ function buildNavGroups(user: User | null, activeServices: string[] = [], isImpe
         { name: 'Email Finder', href: '/cold-email/email-finder', icon: Search },
         { name: 'Reply Inbox', href: '/cold-email/replies', icon: Mail },
         { name: 'Suppressions', href: '/cold-email/suppressions', icon: Ban },
+        { name: 'Deliverability', href: '/cold-email/deliverability', icon: Shield },
       ],
     });
   }

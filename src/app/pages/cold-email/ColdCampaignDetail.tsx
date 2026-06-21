@@ -83,6 +83,12 @@ export function ColdCampaignDetail() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [showTestSend, setShowTestSend] = useState(false);
   const [testEmail, setTestEmail] = useState('');
+  const [showAiWriter, setShowAiWriter] = useState(false);
+  const [aiProduct, setAiProduct] = useState('');
+  const [aiAudience, setAiAudience] = useState('');
+  const [aiGenerating, setAiGenerating] = useState(false);
+  const [showTemplatePicker, setShowTemplatePicker] = useState(false);
+  const [templates, setTemplates] = useState<Array<{ id: string; name: string; category: string; steps: any[] }>>([]);
   const [testSending, setTestSending] = useState(false);
   const [testMessage, setTestMessage] = useState('');
 
@@ -186,6 +192,51 @@ export function ColdCampaignDetail() {
     } finally {
       setTestSending(false);
     }
+  };
+
+  const handleAiGenerate = async () => {
+    if (!aiProduct.trim()) return;
+    setAiGenerating(true);
+    try {
+      const result = await apiRequest<{ content: string }>('/ai/generate-email', {
+        method: 'POST', body: JSON.stringify({ prompt: `Write a 3-step cold email sequence for: Product: ${aiProduct}. Target: ${aiAudience || 'business decision makers'}. Keep each email under 100 words. Format as Step 1/2/3 with subject lines.` }),
+      });
+      const content = result.content ?? '';
+      const stepMatches = content.split(/step\s*\d/i).filter(Boolean);
+      if (stepMatches.length > 0 && campaign) {
+        const newSteps = stepMatches.map((text, i) => {
+          const subjectMatch = text.match(/subject[:\s]*(.+?)[\n\r]/i);
+          const body = text.replace(/subject[:\s]*.+?[\n\r]/i, '').trim();
+          return { subject: subjectMatch?.[1]?.trim() ?? `Follow-up ${i + 1}`, body, delayDays: i === 0 ? 0 : 3, useThreading: i > 0, stepOrder: i };
+        });
+        await apiRequest(`/cold-email/campaigns/${id}/steps`, { method: 'POST', body: JSON.stringify({ steps: newSteps }) });
+        await fetchData();
+      }
+      setShowAiWriter(false); setAiProduct(''); setAiAudience('');
+    } catch {} finally { setAiGenerating(false); }
+  };
+
+  const handleLoadTemplate = async (template: any) => {
+    if (!campaign || !Array.isArray(template.steps)) return;
+    const steps = template.steps.map((s: any, i: number) => ({ ...s, stepOrder: i }));
+    await apiRequest(`/cold-email/campaigns/${id}/steps`, { method: 'POST', body: JSON.stringify({ steps }) });
+    await fetchData();
+    setShowTemplatePicker(false);
+  };
+
+  const handleSaveAsTemplate = async () => {
+    if (!campaign?.steps?.length) return;
+    const name = window.prompt('Template name:');
+    if (!name) return;
+    await apiRequest('/cold-email/sequence-templates', {
+      method: 'POST', body: JSON.stringify({ name, steps: campaign.steps.map(s => ({ subject: s.subject, body: s.body, delayDays: s.delayDays, useThreading: s.useThreading })) }),
+    });
+  };
+
+  const loadTemplates = async () => {
+    const data = await apiRequest<any[]>('/cold-email/sequence-templates').catch(() => []);
+    setTemplates(Array.isArray(data) ? data : []);
+    setShowTemplatePicker(true);
   };
 
   const handleActivate = async () => {
@@ -296,6 +347,40 @@ export function ColdCampaignDetail() {
         </div>
       )}
 
+      {showAiWriter && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowAiWriter(false)} />
+          <div className="relative bg-background rounded-2xl shadow-2xl w-full max-w-md border border-border">
+            <div className="px-6 py-4 border-b"><h2 className="text-base font-semibold">AI Email Writer</h2><p className="text-xs text-muted-foreground mt-0.5">Describe your product and audience to auto-generate a sequence</p></div>
+            <div className="px-6 py-5 space-y-4">
+              <div className="space-y-1.5"><label className="text-sm font-medium">What do you sell? *</label><textarea rows={3} className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm" placeholder="We help B2B companies automate their outreach and book more meetings..." value={aiProduct} onChange={e => setAiProduct(e.target.value)} /></div>
+              <div className="space-y-1.5"><label className="text-sm font-medium">Target audience</label><input className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm" placeholder="SaaS founders, VP Sales, marketing directors..." value={aiAudience} onChange={e => setAiAudience(e.target.value)} /></div>
+              <div className="flex justify-end gap-2 pt-2 border-t">
+                <Button variant="outline" size="sm" onClick={() => setShowAiWriter(false)}>Cancel</Button>
+                <Button size="sm" onClick={() => void handleAiGenerate()} disabled={aiGenerating || !aiProduct.trim()}>{aiGenerating ? 'Generating...' : 'Generate 3-Step Sequence'}</Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showTemplatePicker && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowTemplatePicker(false)} />
+          <div className="relative bg-background rounded-2xl shadow-2xl w-full max-w-md border border-border max-h-[80vh] overflow-y-auto">
+            <div className="px-6 py-4 border-b"><h2 className="text-base font-semibold">Load Template</h2></div>
+            <div className="px-6 py-4 space-y-2">
+              {templates.length === 0 ? <p className="text-sm text-muted-foreground text-center py-8">No templates saved yet</p> : templates.map(t => (
+                <button key={t.id} onClick={() => void handleLoadTemplate(t)} className="w-full text-left p-3 rounded-lg border hover:border-primary hover:bg-primary/5 transition-colors">
+                  <p className="font-medium text-sm">{t.name}</p>
+                  <p className="text-xs text-muted-foreground">{t.category} — {t.steps?.length ?? 0} steps</p>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="flex items-center gap-3">
         <Button variant="ghost" size="sm" asChild>
           <Link to="/cold-email/campaigns">
@@ -377,10 +462,14 @@ export function ColdCampaignDetail() {
                   <CardTitle className="text-base">Sequence Steps</CardTitle>
                   <CardDescription>{campaign.steps?.length ?? 0} steps in this sequence</CardDescription>
                 </div>
-                <Button size="sm" onClick={() => setShowStepModal(true)}>
-                  <Plus className="h-4 w-4 mr-1.5" />
-                  Add Step
-                </Button>
+                <div className="flex gap-2">
+                  <Button size="sm" variant="outline" onClick={() => void loadTemplates()}>Templates</Button>
+                  <Button size="sm" variant="outline" onClick={() => setShowAiWriter(true)}>AI Write</Button>
+                  {campaign.steps?.length > 0 && <Button size="sm" variant="outline" onClick={() => void handleSaveAsTemplate()}>Save Template</Button>}
+                  <Button size="sm" onClick={() => setShowStepModal(true)}>
+                    <Plus className="h-4 w-4 mr-1.5" />Add Step
+                  </Button>
+                </div>
               </div>
             </CardHeader>
             <CardContent className="space-y-3">
@@ -549,6 +638,21 @@ export function ColdCampaignDetail() {
                     {testSending ? 'Sending...' : 'Send Test'}
                   </Button>
                   {testMessage && <p className="text-xs text-center text-emerald-600">{testMessage}</p>}
+                </div>
+              )}
+              {campaign.status === 'draft' && (
+                <div className="space-y-1.5 p-3 rounded-lg border bg-muted/20 mb-2">
+                  <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Pre-flight Checklist</p>
+                  {[
+                    { label: 'Steps configured', ok: (campaign.steps?.length ?? 0) > 0 },
+                    { label: 'Mailboxes assigned', ok: (campaign.mailboxes?.length ?? 0) > 0 },
+                    { label: 'Prospect list linked', ok: campaign.prospectCount > 0 },
+                  ].map(item => (
+                    <div key={item.label} className="flex items-center gap-2 text-xs">
+                      {item.ok ? <CheckCircle className="h-3.5 w-3.5 text-emerald-500" /> : <AlertTriangle className="h-3.5 w-3.5 text-amber-500" />}
+                      <span className={item.ok ? 'text-foreground' : 'text-muted-foreground'}>{item.label}</span>
+                    </div>
+                  ))}
                 </div>
               )}
               {campaign.status === 'active' ? (

@@ -985,6 +985,29 @@ export class ColdEmailService {
   // Prospect Email Validation via MX (Gap 12)
   // ---------------------------------------------------------------------------
 
+  calculateProspectScore(prospect: { validationStatus: string; companyName?: string | null; jobTitle?: string | null }): number {
+    let score = 0;
+    if (prospect.validationStatus === 'valid') score += 30;
+    else if (prospect.validationStatus === 'risky') score += 10;
+    if (prospect.companyName) score += 10;
+    if (prospect.jobTitle) {
+      score += 10;
+      const title = prospect.jobTitle.toLowerCase();
+      if (['ceo', 'cto', 'coo', 'cmo', 'founder', 'co-founder', 'vp', 'vice president', 'director', 'head of', 'chief'].some(t => title.includes(t))) score += 20;
+    }
+    return Math.min(score, 100);
+  }
+
+  async scoreProspects(prospectIds: string[]) {
+    const prospects = await this.prisma.coldProspect.findMany({ where: { id: { in: prospectIds } } });
+    for (const p of prospects) {
+      const score = this.calculateProspectScore(p);
+      if (score !== p.score) {
+        await this.prisma.coldProspect.update({ where: { id: p.id }, data: { score } });
+      }
+    }
+  }
+
   async validateProspectEmails(prospectIds: string[]) {
     if (prospectIds.length === 0) return;
     const prospects = await this.prisma.coldProspect.findMany({ where: { id: { in: prospectIds } } });
