@@ -30,6 +30,7 @@ import {
   Shield,
   Palette,
   Ban,
+  ShoppingCart,
 } from 'lucide-react';
 import { useState, type ComponentType } from 'react';
 import { Badge } from '../components/ui/badge';
@@ -116,6 +117,7 @@ function buildNavGroups(user: User | null, activeServices: string[] = [], isImpe
         { name: 'Domains', href: '/cold-email/domains', icon: Globe },
         { name: 'Provider', href: '/cold-email/provider-connect', icon: Link2 },
         { name: 'Domain Mgmt', href: '/cold-email/domain-manager', icon: Layers },
+        { name: 'Buy Domains', href: '/cold-email/domain-purchase', icon: ShoppingCart },
         { name: 'Auto-Provision', href: '/cold-email/provision', icon: Wand2 },
         { name: 'Personas', href: '/cold-email/personas', icon: UserCircle },
         { name: 'Domain Health', href: '/cold-email/domain-health', icon: HeartPulse },

@@ -7,6 +7,7 @@ import { JobsService } from './services/jobs.service';
 import { MailboxProvisioningService } from './services/mailbox-provisioning.service';
 import { ProviderLogsService } from './services/provider-logs.service';
 import { TranscriptionService } from './services/transcription.service';
+import { DomainRegistrarService } from './services/domain-registrar.service';
 
 @Module({
   imports: [PrismaModule],
@@ -18,6 +19,7 @@ import { TranscriptionService } from './services/transcription.service';
     DnsProviderService,
     MailboxProvisioningService,
     TranscriptionService,
+    DomainRegistrarService,
   ],
   exports: [
     JobsService,
@@ -26,6 +28,7 @@ import { TranscriptionService } from './services/transcription.service';
     DnsProviderService,
     MailboxProvisioningService,
     TranscriptionService,
+    DomainRegistrarService,
   ],
 })
 export class ProvidersModule {}

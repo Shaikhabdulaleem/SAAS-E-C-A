@@ -854,7 +854,7 @@ export class ColdEmailService {
     if (steps.length === 0) throw new BadRequestException('Campaign has no steps');
     const step = steps[stepIndex] ?? steps[0];
 
-    const subject = step.subject
+    const subject = (step.subject ?? '')
       .replace(/\{\{firstName\}\}/g, 'Test').replace(/\{\{first_name\}\}/g, 'Test')
       .replace(/\{\{lastName\}\}/g, 'User').replace(/\{\{last_name\}\}/g, 'User')
       .replace(/\{\{company\}\}/g, 'Test Company').replace(/\{\{jobTitle\}\}/g, 'CEO').replace(/\{\{job_title\}\}/g, 'CEO')
@@ -1140,11 +1140,10 @@ export class ColdEmailService {
 
       let companyId: string | undefined;
       if (companyName) {
-        const company = await this.prisma.company.upsert({
-          where: { tenantId_name: { tenantId, name: companyName } },
-          update: {},
-          create: { tenantId, name: companyName },
-        });
+        let company = await this.prisma.company.findFirst({ where: { tenantId, name: companyName } });
+        if (!company) {
+          company = await this.prisma.company.create({ data: { tenantId, name: companyName } });
+        }
         companyId = company.id;
       }
 

@@ -272,6 +272,7 @@ model Tenant {
   mailboxProvisioningLogs  MailboxProvisioningLog[]
   dnsProvisioningLogs      DnsProvisioningLog[]
   callSessions         CallSession[]
+  domainPurchaseOrders DomainPurchaseOrder[]
   callRecordings       CallRecording[]
   callTranscripts      CallTranscript[]
   callInsights         CallInsight[]
@@ -1579,6 +1580,7 @@ model EmailProviderCredential {
   tenant            Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   domains           SendingDomain[]
   externalAccounts  ProviderExternalAccount[]
+  domainPurchaseOrders DomainPurchaseOrder[]
 
   @@unique([tenantId, providerType])
   @@index([tenantId])
@@ -1782,6 +1784,44 @@ model DomainHealthLog {
   domain          SendingDomain @relation(fields: [domainId], references: [id], onDelete: Cascade)
 
   @@index([domainId, checkedAt])
+}
+
+enum DomainPurchaseStatus {
+  generating
+  checking
+  awaiting_confirmation
+  purchasing
+  setting_nameservers
+  configuring_dns
+  creating_mailboxes
+  warming_up
+  completed
+  failed
+}
+
+model DomainPurchaseOrder {
+  id                    String                @id @default(uuid())
+  tenantId              String
+  baseName              String
+  quantity              Int
+  registrarProvider     String                @default("namecheap")
+  status                DomainPurchaseStatus  @default(generating)
+  domains               Json                  @default("[]")
+  totalCost             Decimal               @default(0) @db.Decimal(12, 2)
+  emailFormat           String                @default("firstname.lastname")
+  companyName           String?
+  jobTitle              String?
+  providerCredentialId  String?
+  lastError             String?
+  createdBy             String
+  createdAt             DateTime              @default(now())
+  updatedAt             DateTime              @updatedAt
+  completedAt           DateTime?
+  tenant                Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  providerCredential    EmailProviderCredential? @relation(fields: [providerCredentialId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, status])
+  @@index([tenantId, createdAt])
 }
 
 model CallSession {

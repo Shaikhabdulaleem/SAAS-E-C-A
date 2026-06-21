@@ -239,4 +239,30 @@ export class DnsProviderService {
     });
     throw new BadRequestException('Namecheap DNS automation requires full Namecheap account API metadata');
   }
+
+  async createCloudflareZone(input: { tenantId: string; domain: string; apiKey: string }): Promise<{ zoneId: string; nameservers: string[] }> {
+    const response = await fetch('https://api.cloudflare.com/client/v4/zones', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${input.apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: input.domain, jump_start: true }),
+    });
+    const body = await response.json().catch(() => ({} as any));
+    await this.logs.create({
+      tenantId: input.tenantId, provider: 'cloudflare', operation: 'zone_create',
+      status: response.ok ? 'success' : 'failed',
+      request: { domain: input.domain }, response: body,
+      error: response.ok ? undefined : JSON.stringify(body),
+    });
+    if (!response.ok) throw new BadRequestException(`Failed to create Cloudflare zone for ${input.domain}: ${body?.errors?.[0]?.message ?? 'Unknown error'}`);
+    return { zoneId: body.result.id, nameservers: body.result.name_servers };
+  }
+
+  async getCloudflareZone(apiKey: string, domain: string): Promise<{ zoneId: string; nameservers: string[] } | null> {
+    const response = await fetch(`https://api.cloudflare.com/client/v4/zones?name=${encodeURIComponent(domain)}`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    const body = await response.json().catch(() => ({} as any));
+    if (!response.ok || !body.result?.length) return null;
+    return { zoneId: body.result[0].id, nameservers: body.result[0].name_servers };
+  }
 }

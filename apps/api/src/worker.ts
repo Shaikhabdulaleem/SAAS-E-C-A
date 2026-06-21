@@ -1,8 +1,8 @@
 import 'reflect-metadata';
 import { Worker } from 'bullmq';
 import IORedis from 'ioredis';
-import { CampaignStatus, EmailEventType, JobStatus, PrismaClient } from '@prisma/client';
-import { createHash, randomBytes } from 'crypto';
+import { CampaignStatus, DnsRecordStatus, EmailEventType, JobStatus, PrismaClient } from '@prisma/client';
+import { createHash, createCipheriv, createDecipheriv, randomBytes } from 'crypto';
 
 const redisUrl = process.env.REDIS_URL;
 if (!redisUrl) {
@@ -192,7 +192,7 @@ async function processColdSequenceTick(data: Record<string, unknown>) {
         .replace(/\{\{job_title\}\}/g, prospect.jobTitle ?? '')
         .replace(/\{\{email\}\}/g, prospect.email);
 
-    const subject = renderTemplate(currentStep.subject);
+    const subject = renderTemplate(currentStep.subject ?? '');
     let body = renderTemplate(currentStep.body);
     body = await withTracking(body, campaign.tenantId ?? '', campaignId, state.prospectId, prospect.email, campaign.trackOpens, campaign.trackClicks) ?? body;
 
@@ -378,10 +378,435 @@ async function processMailboxWarmup(data: Record<string, unknown>) {
   return { processed: true, sent: sentToday + 1, target: dailyTarget };
 }
 
+// ── Encryption helpers (same as EncryptionService but standalone for worker) ──
+
+function workerDecrypt(ciphertext: string): string {
+  const key = createHash('sha256').update(process.env.ENCRYPTION_KEY ?? '').digest();
+  const parts = ciphertext.split('.');
+  if (parts.length !== 3) throw new Error('Invalid ciphertext format');
+  const iv = Buffer.from(parts[0], 'base64url');
+  const tag = Buffer.from(parts[1], 'base64url');
+  const encrypted = Buffer.from(parts[2], 'base64url');
+  const decipher = createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf8');
+}
+
+// ── Domain Purchase Pipeline ─────────────────────────────────────────────
+
+async function processDomainPurchasePipeline(data: Record<string, unknown>) {
+  const payload = (data.payload ?? data) as Record<string, unknown>;
+  const orderId = payload.orderId as string;
+  const phase = payload.phase as string;
+  if (!orderId || !phase) return { skipped: true, reason: 'missing orderId or phase' };
+
+  const order = await prisma.domainPurchaseOrder.findUnique({ where: { id: orderId } });
+  if (!order) return { skipped: true, reason: 'order not found' };
+
+  try {
+    switch (phase) {
+      case 'check_availability': return await pipelineCheckAvailability(order);
+      case 'purchase_domains': return await pipelinePurchaseDomains(order);
+      case 'configure_dns': return await pipelineConfigureDns(order);
+      case 'create_mailboxes': return await pipelineCreateMailboxes(order);
+      case 'enroll_warmup': return await pipelineEnrollWarmup(order);
+      default: return { skipped: true, reason: `unknown phase: ${phase}` };
+    }
+  } catch (error) {
+    await prisma.domainPurchaseOrder.update({
+      where: { id: orderId },
+      data: { status: 'failed', lastError: error instanceof Error ? error.message : String(error) },
+    });
+    throw error;
+  }
+}
+
+async function pipelineCheckAvailability(order: any) {
+  const integration = await prisma.tenantIntegration.findFirst({
+    where: { tenantId: order.tenantId, platformKey: order.registrarProvider, isActive: true },
+  });
+  if (!integration) throw new Error(`${order.registrarProvider} not connected`);
+  const creds = JSON.parse(workerDecrypt(integration.apiKeyCipher));
+
+  const domains = order.domains as any[];
+  const domainNames = domains.map((d: any) => d.domain);
+
+  const results = await workerCheckDomains(order.registrarProvider, creds, domainNames, order.tenantId);
+
+  const updated = domains.map((d: any) => {
+    const result = results.find((r) => r.domain === d.domain);
+    return { ...d, available: result?.available ?? false, price: result?.price ?? null };
+  });
+
+  await prisma.domainPurchaseOrder.update({
+    where: { id: order.id },
+    data: { domains: updated, status: 'awaiting_confirmation' },
+  });
+
+  return { processed: true, available: updated.filter((d: any) => d.available).length, total: updated.length };
+}
+
+async function workerCheckDomains(provider: string, creds: any, domains: string[], tenantId: string) {
+  const results: Array<{ domain: string; available: boolean; price: number | null }> = [];
+
+  if (provider === 'namecheap') {
+    for (let i = 0; i < domains.length; i += 50) {
+      const batch = domains.slice(i, i + 50);
+      const qs = new URLSearchParams({
+        ApiUser: creds.apiUser ?? '', ApiKey: creds.apiKey ?? '', UserName: creds.userName ?? creds.apiUser ?? '',
+        ClientIp: creds.clientIp ?? '0.0.0.0', Command: 'namecheap.domains.check', DomainList: batch.join(','),
+      });
+      const response = await fetch(`https://api.namecheap.com/xml.response?${qs}`);
+      const xml = await response.text();
+      const regex = /Domain="([^"]+)"\s+Available="([^"]+)"/g;
+      let match: RegExpExecArray | null;
+      while ((match = regex.exec(xml)) !== null) {
+        const tld = match[1].split('.').slice(1).join('.');
+        const prices: Record<string, number> = { com: 10.98, io: 32.98, co: 11.98, net: 12.98, org: 9.98 };
+        results.push({ domain: match[1], available: match[2] === 'true', price: prices[tld] ?? 12.98 });
+      }
+    }
+  } else if (provider === 'porkbun') {
+    for (const domain of domains) {
+      try {
+        const r = await fetch('https://api.porkbun.com/api/json/v3/domain/check', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ apikey: creds.apikey, secretapikey: creds.secretapikey, domain }),
+        });
+        const d = await r.json();
+        results.push({ domain, available: d.status === 'SUCCESS' && d.available === true, price: d.pricing?.registration ? parseFloat(d.pricing.registration) : null });
+      } catch { results.push({ domain, available: false, price: null }); }
+    }
+  } else if (provider === 'dynadot') {
+    for (const domain of domains) {
+      try {
+        const r = await fetch(`https://api.dynadot.com/api3.json?key=${encodeURIComponent(creds.apiKey)}&command=search&domain0=${encodeURIComponent(domain)}`);
+        const d = await r.json();
+        const sr = d?.SearchResponse?.SearchResults?.[0] ?? {};
+        results.push({ domain, available: sr.Available === 'yes', price: sr.Price ? parseFloat(sr.Price) : null });
+      } catch { results.push({ domain, available: false, price: null }); }
+    }
+  } else if (provider === 'godaddy') {
+    for (const domain of domains) {
+      try {
+        const r = await fetch(`https://api.godaddy.com/v1/domains/available?domain=${encodeURIComponent(domain)}`, {
+          headers: { Authorization: `sso-key ${creds.key}:${creds.secret}` },
+        });
+        const d = await r.json();
+        results.push({ domain, available: d.available === true, price: d.price ? d.price / 1000000 : null });
+      } catch { results.push({ domain, available: false, price: null }); }
+    }
+  }
+  return results;
+}
+
+async function pipelinePurchaseDomains(order: any) {
+  const integration = await prisma.tenantIntegration.findFirst({
+    where: { tenantId: order.tenantId, platformKey: order.registrarProvider, isActive: true },
+  });
+  if (!integration) throw new Error(`${order.registrarProvider} not connected`);
+  const creds = JSON.parse(workerDecrypt(integration.apiKeyCipher));
+
+  const domains = order.domains as any[];
+  let purchased = 0;
+
+  for (const d of domains) {
+    if (!d.selected || !d.available || d.purchaseStatus !== 'pending') continue;
+    try {
+      const success = await workerPurchaseDomain(order.registrarProvider, creds, d.domain, order.tenantId);
+      d.purchaseStatus = success ? 'purchased' : 'failed';
+      d.purchaseError = success ? undefined : 'Purchase failed';
+      if (success) purchased++;
+    } catch (err) {
+      d.purchaseStatus = 'failed';
+      d.purchaseError = err instanceof Error ? err.message : 'Purchase failed';
+    }
+    await prisma.domainPurchaseOrder.update({ where: { id: order.id }, data: { domains: domains } });
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+
+  if (purchased > 0) {
+    await prisma.domainPurchaseOrder.update({ where: { id: order.id }, data: { status: 'setting_nameservers' } });
+    const queue = new (await import('bullmq')).Queue('domain-purchase-pipeline', { connection: connection as never });
+    await queue.add('configure_dns', { orderId: order.id, phase: 'configure_dns' }, { delay: 5000 });
+    await queue.close();
+  } else {
+    await prisma.domainPurchaseOrder.update({ where: { id: order.id }, data: { status: 'failed', lastError: 'No domains purchased successfully' } });
+  }
+
+  return { processed: true, purchased };
+}
+
+async function workerPurchaseDomain(provider: string, creds: any, domain: string, tenantId: string): Promise<boolean> {
+  if (provider === 'namecheap') {
+    const qs = new URLSearchParams({
+      ApiUser: creds.apiUser ?? '', ApiKey: creds.apiKey ?? '', UserName: creds.userName ?? creds.apiUser ?? '',
+      ClientIp: creds.clientIp ?? '0.0.0.0', Command: 'namecheap.domains.create', DomainName: domain, Years: '1',
+      RegistrantFirstName: 'Domain', RegistrantLastName: 'Admin', RegistrantAddress1: '123 Main St',
+      RegistrantCity: 'New York', RegistrantStateProvince: 'NY', RegistrantPostalCode: '10001', RegistrantCountry: 'US',
+      RegistrantPhone: '+1.5555555555', RegistrantEmailAddress: 'admin@domain.com',
+      TechFirstName: 'Domain', TechLastName: 'Admin', TechAddress1: '123 Main St', TechCity: 'New York',
+      TechStateProvince: 'NY', TechPostalCode: '10001', TechCountry: 'US', TechPhone: '+1.5555555555', TechEmailAddress: 'admin@domain.com',
+      AdminFirstName: 'Domain', AdminLastName: 'Admin', AdminAddress1: '123 Main St', AdminCity: 'New York',
+      AdminStateProvince: 'NY', AdminPostalCode: '10001', AdminCountry: 'US', AdminPhone: '+1.5555555555', AdminEmailAddress: 'admin@domain.com',
+      AuxBillingFirstName: 'Domain', AuxBillingLastName: 'Admin', AuxBillingAddress1: '123 Main St', AuxBillingCity: 'New York',
+      AuxBillingStateProvince: 'NY', AuxBillingPostalCode: '10001', AuxBillingCountry: 'US', AuxBillingPhone: '+1.5555555555', AuxBillingEmailAddress: 'admin@domain.com',
+      AddFreeWhoisguard: 'yes', WGEnabled: 'yes',
+    });
+    const r = await fetch(`https://api.namecheap.com/xml.response?${qs}`);
+    const xml = await r.text();
+    return xml.includes('Registered="true"') || xml.includes('Status="OK"');
+  }
+  if (provider === 'porkbun') {
+    const r = await fetch('https://api.porkbun.com/api/json/v3/domain/register', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apikey: creds.apikey, secretapikey: creds.secretapikey, domain, years: '1' }),
+    });
+    const d = await r.json();
+    return d.status === 'SUCCESS';
+  }
+  if (provider === 'dynadot') {
+    const r = await fetch(`https://api.dynadot.com/api3.json?key=${encodeURIComponent(creds.apiKey)}&command=register&domain=${encodeURIComponent(domain)}&duration=1`);
+    const d = await r.json();
+    return d?.RegisterResponse?.Status === 'success';
+  }
+  if (provider === 'godaddy') {
+    const r = await fetch('https://api.godaddy.com/v1/domains/purchase', {
+      method: 'POST', headers: { Authorization: `sso-key ${creds.key}:${creds.secret}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ domain, consent: { agreedAt: new Date().toISOString(), agreedBy: '0.0.0.0', agreementKeys: ['DNRA'] }, period: 1, privacy: true, renewAuto: false,
+        contactAdmin: { firstName: 'Domain', lastName: 'Admin', email: 'admin@domain.com', phone: '+1.5555555555', addressMailing: { address1: '123 Main St', city: 'New York', state: 'NY', postalCode: '10001', country: 'US' } },
+        contactRegistrant: { firstName: 'Domain', lastName: 'Admin', email: 'admin@domain.com', phone: '+1.5555555555', addressMailing: { address1: '123 Main St', city: 'New York', state: 'NY', postalCode: '10001', country: 'US' } },
+        contactTech: { firstName: 'Domain', lastName: 'Admin', email: 'admin@domain.com', phone: '+1.5555555555', addressMailing: { address1: '123 Main St', city: 'New York', state: 'NY', postalCode: '10001', country: 'US' } },
+      }),
+    });
+    return r.ok;
+  }
+  return false;
+}
+
+async function pipelineConfigureDns(order: any) {
+  const cfIntegration = await prisma.tenantIntegration.findFirst({
+    where: { tenantId: order.tenantId, platformKey: 'cloudflare', isActive: true },
+  });
+  if (!cfIntegration) throw new Error('Cloudflare not connected');
+  const cfApiKey = workerDecrypt(cfIntegration.apiKeyCipher);
+
+  const regIntegration = await prisma.tenantIntegration.findFirst({
+    where: { tenantId: order.tenantId, platformKey: order.registrarProvider, isActive: true },
+  });
+  const regCreds = regIntegration ? JSON.parse(workerDecrypt(regIntegration.apiKeyCipher)) : null;
+
+  const domains = order.domains as any[];
+  await prisma.domainPurchaseOrder.update({ where: { id: order.id }, data: { status: 'configuring_dns' } });
+
+  for (const d of domains) {
+    if (d.purchaseStatus !== 'purchased' || d.dnsStatus !== 'pending') continue;
+    try {
+      const zoneResponse = await fetch('https://api.cloudflare.com/client/v4/zones', {
+        method: 'POST', headers: { Authorization: `Bearer ${cfApiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: d.domain, jump_start: true }),
+      });
+      const zoneData = await zoneResponse.json() as any;
+      if (!zoneResponse.ok) { d.dnsStatus = 'failed'; d.dnsError = zoneData?.errors?.[0]?.message ?? 'Zone creation failed'; continue; }
+
+      d.cloudflareZoneId = zoneData.result.id;
+      d.cloudflareNameservers = zoneData.result.name_servers;
+      d.dnsStatus = 'zone_created';
+
+      if (regCreds) {
+        await workerSetNameservers(order.registrarProvider, regCreds, d.domain, zoneData.result.name_servers);
+        d.dnsStatus = 'nameservers_set';
+      }
+
+      const dnsRecords = [
+        { type: 'TXT', name: d.domain, value: 'v=spf1 include:spf.protection.outlook.com include:sendgrid.net ~all', ttl: 1 },
+        { type: 'TXT', name: `_dmarc.${d.domain}`, value: `v=DMARC1; p=quarantine; rua=mailto:dmarc@${d.domain}`, ttl: 1 },
+        { type: 'MX', name: d.domain, value: `${d.domain.replace(/\./g, '-')}.mail.protection.outlook.com`, priority: 0, ttl: 1 },
+      ];
+      for (const record of dnsRecords) {
+        await fetch(`https://api.cloudflare.com/client/v4/zones/${d.cloudflareZoneId}/dns_records`, {
+          method: 'POST', headers: { Authorization: `Bearer ${cfApiKey}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: record.type, name: record.name, content: record.value, ttl: record.ttl, priority: record.priority }),
+        });
+      }
+      d.dnsStatus = 'records_created';
+
+      const sendingDomain = await prisma.sendingDomain.create({
+        data: {
+          tenantId: order.tenantId, domain: d.domain, dnsProvider: 'cloudflare',
+          dnsApiKeyCipher: cfIntegration.apiKeyCipher, dnsZoneId: d.cloudflareZoneId,
+          providerCredentialId: order.providerCredentialId,
+          spfStatus: DnsRecordStatus.not_set, dkimStatus: DnsRecordStatus.not_set,
+          dmarcStatus: DnsRecordStatus.not_set, mxStatus: DnsRecordStatus.not_set,
+          targetDailyVolume: 50, requiredMailboxes: 1,
+        },
+      });
+      d.sendingDomainId = sendingDomain.id;
+    } catch (err) {
+      d.dnsStatus = 'failed';
+      d.dnsError = err instanceof Error ? err.message : 'DNS configuration failed';
+    }
+    await prisma.domainPurchaseOrder.update({ where: { id: order.id }, data: { domains: domains } });
+  }
+
+  const dnsConfigured = domains.filter((d: any) => d.sendingDomainId).length;
+  if (dnsConfigured > 0) {
+    await prisma.domainPurchaseOrder.update({ where: { id: order.id }, data: { status: 'creating_mailboxes' } });
+    const queue = new (await import('bullmq')).Queue('domain-purchase-pipeline', { connection: connection as never });
+    await queue.add('create_mailboxes', { orderId: order.id, phase: 'create_mailboxes' }, { delay: 5000 });
+    await queue.close();
+  } else {
+    await prisma.domainPurchaseOrder.update({ where: { id: order.id }, data: { status: 'failed', lastError: 'No domains configured successfully' } });
+  }
+  return { processed: true, configured: dnsConfigured };
+}
+
+async function workerSetNameservers(provider: string, creds: any, domain: string, nameservers: string[]) {
+  if (provider === 'namecheap') {
+    const [sld, ...tldParts] = domain.split('.'); const tld = tldParts.join('.');
+    const qs = new URLSearchParams({
+      ApiUser: creds.apiUser ?? '', ApiKey: creds.apiKey ?? '', UserName: creds.userName ?? creds.apiUser ?? '',
+      ClientIp: creds.clientIp ?? '0.0.0.0', Command: 'namecheap.domains.dns.setCustom', SLD: sld, TLD: tld, Nameservers: nameservers.join(','),
+    });
+    await fetch(`https://api.namecheap.com/xml.response?${qs}`);
+  } else if (provider === 'porkbun') {
+    await fetch(`https://api.porkbun.com/api/json/v3/domain/updateNs/${domain}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apikey: creds.apikey, secretapikey: creds.secretapikey, ns: nameservers }),
+    });
+  } else if (provider === 'dynadot') {
+    const nsParams = nameservers.map((ns, i) => `ns${i}=${encodeURIComponent(ns)}`).join('&');
+    await fetch(`https://api.dynadot.com/api3.json?key=${encodeURIComponent(creds.apiKey)}&command=set_ns&domain=${encodeURIComponent(domain)}&${nsParams}`);
+  } else if (provider === 'godaddy') {
+    await fetch(`https://api.godaddy.com/v1/domains/${encodeURIComponent(domain)}`, {
+      method: 'PATCH', headers: { Authorization: `sso-key ${creds.key}:${creds.secret}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nameServers: nameservers }),
+    });
+  }
+}
+
+async function pipelineCreateMailboxes(order: any) {
+  const domains = order.domains as any[];
+  const credential = order.providerCredentialId
+    ? await prisma.emailProviderCredential.findUnique({ where: { id: order.providerCredentialId } })
+    : null;
+
+  if (!credential) {
+    await prisma.domainPurchaseOrder.update({ where: { id: order.id }, data: { status: 'failed', lastError: 'No Microsoft 365 credential configured' } });
+    return { processed: true, created: 0 };
+  }
+
+  const msTenantId = credential.msTenantIdCipher ? workerDecrypt(credential.msTenantIdCipher) : '';
+  const clientId = credential.clientIdCipher ? workerDecrypt(credential.clientIdCipher) : '';
+  const clientSecret = credential.clientSecretCipher ? workerDecrypt(credential.clientSecretCipher) : '';
+
+  const firstNames = ['James', 'Sarah', 'Michael', 'Emily', 'David', 'Jessica', 'Robert', 'Ashley', 'John', 'Amanda'];
+  const lastNames = ['Smith', 'Johnson', 'Williams', 'Brown', 'Jones', 'Davis', 'Miller', 'Wilson', 'Moore', 'Taylor'];
+  let created = 0;
+
+  for (const d of domains) {
+    if (!d.sendingDomainId || d.mailboxStatus !== 'pending') continue;
+    try {
+      const fi = Math.floor(Math.random() * firstNames.length);
+      const li = Math.floor(Math.random() * lastNames.length);
+      const firstName = firstNames[fi]; const lastName = lastNames[li];
+      const format = order.emailFormat ?? 'firstname.lastname';
+      let localPart = `${firstName.toLowerCase()}.${lastName.toLowerCase()}`;
+      if (format === 'firstname') localPart = firstName.toLowerCase();
+      else if (format === 'firstnamelastname') localPart = `${firstName.toLowerCase()}${lastName.toLowerCase()}`;
+      else if (format === 'f.lastname') localPart = `${firstName[0].toLowerCase()}.${lastName.toLowerCase()}`;
+      const email = `${localPart}@${d.domain}`;
+      const tempPassword = randomBytes(9).toString('base64url') + '!A1';
+
+      const tokenRes = await fetch(`https://login.microsoftonline.com/${msTenantId}/oauth2/v2.0/token`, {
+        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ grant_type: 'client_credentials', client_id: clientId, client_secret: clientSecret, scope: 'https://graph.microsoft.com/.default' }),
+      });
+      const tokenData = await tokenRes.json() as any;
+      if (!tokenData.access_token) { d.mailboxStatus = 'failed'; d.mailboxError = 'Failed to get M365 token'; continue; }
+
+      const userRes = await fetch('https://graph.microsoft.com/v1.0/users', {
+        method: 'POST', headers: { Authorization: `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          accountEnabled: true, displayName: `${firstName} ${lastName}`, mailNickname: localPart.replace('.', ''),
+          userPrincipalName: email, passwordProfile: { password: tempPassword, forceChangePasswordNextSignIn: true },
+          usageLocation: 'US',
+        }),
+      });
+      const userData = await userRes.json() as any;
+      if (!userRes.ok) { d.mailboxStatus = 'failed'; d.mailboxError = userData?.error?.message ?? 'M365 user creation failed'; continue; }
+
+      const mailbox = await prisma.coldMailbox.create({
+        data: {
+          tenantId: order.tenantId, provider: 'outlook', email, fromName: `${firstName} ${lastName}`,
+          dailySendLimit: 5, minDelaySeconds: 180, maxDelaySeconds: 480,
+          warmupEnabled: true, warmupStatus: 'warming', domainId: d.sendingDomainId,
+        },
+      });
+
+      await prisma.persona.create({
+        data: {
+          tenantId: order.tenantId, domainId: d.sendingDomainId, mailboxId: mailbox.id,
+          firstName, lastName, email, jobTitle: order.jobTitle ?? 'Sales Development Rep',
+          companyName: order.companyName ?? d.domain.split('.')[0],
+          warmupStatus: 'warming', warmupDay: 1, healthScore: 10, dailySendLimit: 5,
+        },
+      });
+
+      await prisma.linkedInSlot.create({
+        data: { personaId: (await prisma.persona.findFirst({ where: { mailboxId: mailbox.id } }))!.id },
+      }).catch(() => undefined);
+
+      d.mailboxStatus = 'created';
+      created++;
+    } catch (err) {
+      d.mailboxStatus = 'failed';
+      d.mailboxError = err instanceof Error ? err.message : 'Mailbox creation failed';
+    }
+    await prisma.domainPurchaseOrder.update({ where: { id: order.id }, data: { domains: domains } });
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+
+  if (created > 0) {
+    await prisma.domainPurchaseOrder.update({ where: { id: order.id }, data: { status: 'warming_up' } });
+    const queue = new (await import('bullmq')).Queue('domain-purchase-pipeline', { connection: connection as never });
+    await queue.add('enroll_warmup', { orderId: order.id, phase: 'enroll_warmup' }, { delay: 3000 });
+    await queue.close();
+  } else {
+    await prisma.domainPurchaseOrder.update({ where: { id: order.id }, data: { status: 'failed', lastError: 'No mailboxes created' } });
+  }
+  return { processed: true, created };
+}
+
+async function pipelineEnrollWarmup(order: any) {
+  const domains = order.domains as any[];
+  const warmupQueue = new (await import('bullmq')).Queue('mailbox-warmup', { connection: connection as never });
+  let enrolled = 0;
+
+  for (const d of domains) {
+    if (d.mailboxStatus !== 'created' || d.warmupStatus !== 'pending') continue;
+    const mailbox = d.sendingDomainId ? await prisma.coldMailbox.findFirst({ where: { domainId: d.sendingDomainId, tenantId: order.tenantId } }) : null;
+    if (mailbox) {
+      await warmupQueue.add('warmup', { mailboxId: mailbox.id, tenantId: order.tenantId }, { delay: 60000 });
+      d.warmupStatus = 'enrolled';
+      enrolled++;
+    }
+  }
+
+  await warmupQueue.close();
+  await prisma.domainPurchaseOrder.update({
+    where: { id: order.id },
+    data: { domains: domains, status: 'completed', completedAt: new Date() },
+  });
+
+  return { processed: true, enrolled };
+}
+
 const handlers: Record<string, (data: Record<string, unknown>) => Promise<Record<string, unknown>>> = {
   'email-campaigns': processEmailCampaign,
   'cold-email-sequences': processColdSequenceTick,
   'mailbox-warmup': processMailboxWarmup,
+  'domain-purchase-pipeline': processDomainPurchasePipeline,
   'notifications': processNotification,
   'dns-checks': processDnsCheck,
 };
@@ -390,6 +815,7 @@ const queues = [
   'email-campaigns',
   'cold-email-sequences',
   'mailbox-warmup',
+  'domain-purchase-pipeline',
   'provider-sync',
   'dns-checks',
   'notifications',

@@ -12,6 +12,8 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { DnsProviderService } from '../providers/services/dns-provider.service';
 import { MailboxProvisioningService } from '../providers/services/mailbox-provisioning.service';
+import { DomainRegistrarService } from '../providers/services/domain-registrar.service';
+import { JobsService } from '../providers/services/jobs.service';
 import { EncryptionService } from '../tenants/encryption.service';
 
 @Injectable()
@@ -21,6 +23,8 @@ export class ProvisioningService {
     private readonly encryption: EncryptionService,
     private readonly mailboxProvisioning: MailboxProvisioningService,
     private readonly dnsProvider: DnsProviderService,
+    private readonly domainRegistrar: DomainRegistrarService,
+    private readonly jobs: JobsService,
   ) {}
 
   private readonly firstNames: string[] = [
@@ -1345,5 +1349,150 @@ export class ProvisioningService {
     if (value === undefined || value === null || value === '') return fallback;
     if (!allowed.includes(value as T)) throw new BadRequestException('Invalid enum value');
     return value as T;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // DOMAIN PURCHASE PIPELINE (Inframail)
+  // ═══════════════════════════════════════════════════════════════════
+
+  generateDomainVariations(baseName: string, quantity: number): string[] {
+    const name = baseName.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (!name) return [];
+
+    const suffixes = ['mail', 'reach', 'hq', 'outreach', 'sends', 'inbox', 'connect', 'works', 'team', 'hub'];
+    const prefixes = ['get', 'try', 'use', 'go', 'my', 'the'];
+    const bizSuffixes = ['solutions', 'group', 'digital', 'agency', 'labs', 'media', 'consulting', 'co', 'studio', 'tech'];
+    const separators = ['', '-'];
+    const tlds = ['.com', '.io', '.co', '.net', '.org'];
+
+    const variations = new Set<string>();
+
+    for (const tld of tlds) {
+      variations.add(`${name}${tld}`);
+      for (const suffix of suffixes) {
+        for (const sep of separators) {
+          variations.add(`${name}${sep}${suffix}${tld}`);
+        }
+      }
+      for (const prefix of prefixes) {
+        variations.add(`${prefix}${name}${tld}`);
+        variations.add(`${prefix}-${name}${tld}`);
+      }
+      for (const suffix of bizSuffixes) {
+        for (const sep of separators) {
+          variations.add(`${name}${sep}${suffix}${tld}`);
+        }
+      }
+    }
+
+    const arr = [...variations];
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr.slice(0, Math.min(quantity * 5, 50));
+  }
+
+  async createDomainPurchaseOrder(tenantId: string, userId: string, body: Record<string, unknown>) {
+    const baseName = this.requiredString(body.baseName, 'baseName');
+    const quantity = this.optionalNumber(body.quantity, 5) ?? 5;
+    const registrarProvider = this.optionalString(body.registrarProvider) ?? 'namecheap';
+    const emailFormat = this.optionalString(body.emailFormat) ?? 'firstname.lastname';
+    const companyName = this.optionalString(body.companyName);
+    const jobTitle = this.optionalString(body.jobTitle) ?? 'Sales Development Rep';
+    const providerCredentialId = this.optionalString(body.providerCredentialId);
+
+    await this.domainRegistrar.getRegistrarCredentials(tenantId, registrarProvider);
+
+    const cfIntegration = await this.prisma.tenantIntegration.findFirst({ where: { tenantId, platformKey: 'cloudflare', isActive: true } });
+    if (!cfIntegration) throw new BadRequestException('Cloudflare is not connected. Go to Settings > Integrations.');
+
+    if (providerCredentialId) {
+      const cred = await this.prisma.emailProviderCredential.findFirst({ where: { id: providerCredentialId, tenantId } });
+      if (!cred) throw new BadRequestException('Email provider credential not found');
+    }
+
+    const domainVariations = this.generateDomainVariations(baseName, quantity);
+    const domainItems = domainVariations.map((d) => {
+      const parts = d.split('.');
+      const tld = parts.slice(1).join('.');
+      return {
+        domain: d, tld, available: null, price: null, currency: 'USD', selected: false,
+        purchaseStatus: 'pending', dnsStatus: 'pending', mailboxStatus: 'pending', warmupStatus: 'pending',
+      };
+    });
+
+    const order = await this.prisma.domainPurchaseOrder.create({
+      data: {
+        tenantId, baseName, quantity, registrarProvider, status: 'generating',
+        domains: domainItems as any, emailFormat, companyName, jobTitle,
+        providerCredentialId, createdBy: userId,
+      },
+    });
+
+    await this.jobs.enqueue(tenantId, 'domain-purchase-pipeline', 'check_availability', { orderId: order.id, phase: 'check_availability' });
+    return order;
+  }
+
+  async getDomainPurchaseOrder(tenantId: string, orderId: string) {
+    const order = await this.prisma.domainPurchaseOrder.findFirst({ where: { id: orderId, tenantId } });
+    if (!order) throw new NotFoundException('Purchase order not found');
+    return order;
+  }
+
+  async listDomainPurchaseOrders(tenantId: string) {
+    return this.prisma.domainPurchaseOrder.findMany({
+      where: { tenantId },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  async confirmDomainSelection(tenantId: string, orderId: string, body: Record<string, unknown>) {
+    const order = await this.getDomainPurchaseOrder(tenantId, orderId);
+    if (order.status !== 'awaiting_confirmation') throw new BadRequestException('Order is not awaiting confirmation');
+
+    const selectedDomains = Array.isArray(body.selectedDomains) ? body.selectedDomains.filter((d): d is string => typeof d === 'string') : [];
+    if (selectedDomains.length === 0) throw new BadRequestException('Select at least one domain');
+
+    const selectedSet = new Set(selectedDomains);
+    const domains = (order.domains as any[]).map((d: any) => ({
+      ...d,
+      selected: selectedSet.has(d.domain),
+    }));
+    const totalCost = domains.filter((d: any) => d.selected && d.available).reduce((sum: number, d: any) => sum + (d.price ?? 0), 0);
+
+    await this.prisma.domainPurchaseOrder.update({
+      where: { id: orderId },
+      data: { domains: domains as any, totalCost, status: 'purchasing' },
+    });
+
+    await this.jobs.enqueue(tenantId, 'domain-purchase-pipeline', 'purchase_domains', { orderId, phase: 'purchase_domains' });
+    return this.getDomainPurchaseOrder(tenantId, orderId);
+  }
+
+  async retryFailedDomains(tenantId: string, orderId: string) {
+    const order = await this.getDomainPurchaseOrder(tenantId, orderId);
+    if (order.status !== 'failed' && order.status !== 'completed') throw new BadRequestException('Order cannot be retried');
+
+    const domains = (order.domains as any[]).map((d: any) => {
+      if (d.selected && d.purchaseStatus === 'failed') return { ...d, purchaseStatus: 'pending' };
+      if (d.dnsStatus === 'failed') return { ...d, dnsStatus: 'pending' };
+      if (d.mailboxStatus === 'failed') return { ...d, mailboxStatus: 'pending' };
+      return d;
+    });
+
+    const hasRetryable = domains.some((d: any) => d.purchaseStatus === 'pending' || d.dnsStatus === 'pending' || d.mailboxStatus === 'pending');
+    if (!hasRetryable) throw new BadRequestException('No failed domains to retry');
+
+    const hasPurchasePending = domains.some((d: any) => d.selected && d.purchaseStatus === 'pending');
+    const phase = hasPurchasePending ? 'purchase_domains' : 'configure_dns';
+
+    await this.prisma.domainPurchaseOrder.update({
+      where: { id: orderId },
+      data: { domains: domains as any, status: phase === 'purchase_domains' ? 'purchasing' : 'configuring_dns', lastError: null },
+    });
+
+    await this.jobs.enqueue(tenantId, 'domain-purchase-pipeline', phase, { orderId, phase });
+    return this.getDomainPurchaseOrder(tenantId, orderId);
   }
 }

@@ -32,6 +32,7 @@ import { Personas } from "./pages/cold-email/Personas";
 import { DomainHealth } from "./pages/cold-email/DomainHealth";
 import { WarmupDashboard } from "./pages/cold-email/WarmupDashboard";
 import { EmailFinder } from "./pages/cold-email/EmailFinder";
+import { DomainPurchase } from "./pages/cold-email/DomainPurchase";
 import { AIAssistant } from "./pages/AIAssistant";
 import { ProposalList } from "./pages/proposals/ProposalList";
 import { ProposalCreate } from "./pages/proposals/ProposalCreate";
@@ -97,6 +98,7 @@ export const router = createBrowserRouter([
       { path: "cold-email/domain-health", element: withService("cold_email", <DomainHealth />) },
       { path: "cold-email/warmup", element: withService("cold_email", <WarmupDashboard />) },
       { path: "cold-email/email-finder", element: withService("cold_email", <EmailFinder />) },
+      { path: "cold-email/domain-purchase", element: withService("cold_email", <DomainPurchase />) },
       { path: "ai-assistant", element: withService("ai_assistant", <AIAssistant />) },
       { path: "settings", Component: Settings },
       { path: "settings/brand", element: withService("proposals", <BrandSettings />) },

@@ -19,6 +19,33 @@ function tenantId(user: AuthenticatedUser, selectedTenantId?: string) {
 export class ProvisioningController {
   constructor(private readonly provisioning: ProvisioningService) {}
 
+  // ── Domain Purchase Pipeline (Inframail) ──────────────────────────
+
+  @Post('domain-purchase/orders')
+  createPurchaseOrder(@CurrentUser() user: AuthenticatedUser, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.provisioning.createDomainPurchaseOrder(tenantId(user, selectedTenantId), user.id, body);
+  }
+
+  @Get('domain-purchase/orders')
+  listPurchaseOrders(@CurrentUser() user: AuthenticatedUser, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.provisioning.listDomainPurchaseOrders(tenantId(user, selectedTenantId));
+  }
+
+  @Get('domain-purchase/orders/:orderId')
+  getPurchaseOrder(@CurrentUser() user: AuthenticatedUser, @Param('orderId') orderId: string, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.provisioning.getDomainPurchaseOrder(tenantId(user, selectedTenantId), orderId);
+  }
+
+  @Post('domain-purchase/orders/:orderId/confirm')
+  confirmPurchaseOrder(@CurrentUser() user: AuthenticatedUser, @Param('orderId') orderId: string, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.provisioning.confirmDomainSelection(tenantId(user, selectedTenantId), orderId, body);
+  }
+
+  @Post('domain-purchase/orders/:orderId/retry')
+  retryPurchaseOrder(@CurrentUser() user: AuthenticatedUser, @Param('orderId') orderId: string, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.provisioning.retryFailedDomains(tenantId(user, selectedTenantId), orderId);
+  }
+
   // ── Provider Credentials ───────────────────────────────────────────
 
   @Post('providers/connect')
