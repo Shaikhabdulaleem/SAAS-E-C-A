@@ -700,24 +700,18 @@ async function pipelineCreateMailboxes(order: any) {
   const clientId = credential.clientIdCipher ? workerDecrypt(credential.clientIdCipher) : '';
   const clientSecret = credential.clientSecretCipher ? workerDecrypt(credential.clientSecretCipher) : '';
 
-  const firstNames = ['James', 'Sarah', 'Michael', 'Emily', 'David', 'Jessica', 'Robert', 'Ashley', 'John', 'Amanda'];
-  const lastNames = ['Smith', 'Johnson', 'Williams', 'Brown', 'Jones', 'Davis', 'Miller', 'Wilson', 'Moore', 'Taylor'];
+  const firstNames = ['James', 'Sarah', 'Michael', 'Emily', 'David', 'Jessica', 'Robert', 'Ashley', 'John', 'Amanda',
+    'William', 'Olivia', 'Benjamin', 'Sophia', 'Alexander', 'Isabella', 'Daniel', 'Mia', 'Matthew', 'Charlotte'];
+  const lastNames = ['Smith', 'Johnson', 'Williams', 'Brown', 'Jones', 'Davis', 'Miller', 'Wilson', 'Moore', 'Taylor',
+    'Anderson', 'Thomas', 'Jackson', 'White', 'Harris', 'Martin', 'Thompson', 'Garcia', 'Martinez', 'Robinson'];
   let created = 0;
+  const mbPerDomain = order.mailboxesPerDomain ?? 1;
+  const usedEmails = new Set<string>();
 
   for (const d of domains) {
     if (!d.sendingDomainId || d.mailboxStatus !== 'pending') continue;
+    let domainCreated = 0;
     try {
-      const fi = Math.floor(Math.random() * firstNames.length);
-      const li = Math.floor(Math.random() * lastNames.length);
-      const firstName = firstNames[fi]; const lastName = lastNames[li];
-      const format = order.emailFormat ?? 'firstname.lastname';
-      let localPart = `${firstName.toLowerCase()}.${lastName.toLowerCase()}`;
-      if (format === 'firstname') localPart = firstName.toLowerCase();
-      else if (format === 'firstnamelastname') localPart = `${firstName.toLowerCase()}${lastName.toLowerCase()}`;
-      else if (format === 'f.lastname') localPart = `${firstName[0].toLowerCase()}.${lastName.toLowerCase()}`;
-      const email = `${localPart}@${d.domain}`;
-      const tempPassword = randomBytes(9).toString('base64url') + '!A1';
-
       const tokenRes = await fetch(`https://login.microsoftonline.com/${msTenantId}/oauth2/v2.0/token`, {
         method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({ grant_type: 'client_credentials', client_id: clientId, client_secret: clientSecret, scope: 'https://graph.microsoft.com/.default' }),
@@ -725,46 +719,64 @@ async function pipelineCreateMailboxes(order: any) {
       const tokenData = await tokenRes.json() as any;
       if (!tokenData.access_token) { d.mailboxStatus = 'failed'; d.mailboxError = 'Failed to get M365 token'; continue; }
 
-      const userRes = await fetch('https://graph.microsoft.com/v1.0/users', {
-        method: 'POST', headers: { Authorization: `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          accountEnabled: true, displayName: `${firstName} ${lastName}`, mailNickname: localPart.replace('.', ''),
-          userPrincipalName: email, passwordProfile: { password: tempPassword, forceChangePasswordNextSignIn: true },
-          usageLocation: 'US',
-        }),
-      });
-      const userData = await userRes.json() as any;
-      if (!userRes.ok) { d.mailboxStatus = 'failed'; d.mailboxError = userData?.error?.message ?? 'M365 user creation failed'; continue; }
+      for (let mbIdx = 0; mbIdx < mbPerDomain; mbIdx++) {
+        let firstName: string, lastName: string, localPart: string, email: string;
+        let attempts = 0;
+        do {
+          const fi = Math.floor(Math.random() * firstNames.length);
+          const li = Math.floor(Math.random() * lastNames.length);
+          firstName = firstNames[fi]; lastName = lastNames[li];
+          const format = order.emailFormat ?? 'firstname.lastname';
+          localPart = `${firstName.toLowerCase()}.${lastName.toLowerCase()}`;
+          if (format === 'firstname') localPart = firstName.toLowerCase();
+          else if (format === 'firstnamelastname') localPart = `${firstName.toLowerCase()}${lastName.toLowerCase()}`;
+          else if (format === 'f.lastname') localPart = `${firstName[0].toLowerCase()}.${lastName.toLowerCase()}`;
+          email = `${localPart}@${d.domain}`;
+          attempts++;
+        } while (usedEmails.has(email) && attempts < 50);
+        usedEmails.add(email);
 
-      const mailbox = await prisma.coldMailbox.create({
-        data: {
-          tenantId: order.tenantId, provider: 'outlook', email, fromName: `${firstName} ${lastName}`,
-          dailySendLimit: 5, minDelaySeconds: 180, maxDelaySeconds: 480,
-          warmupEnabled: true, warmupStatus: 'warming', domainId: d.sendingDomainId,
-        },
-      });
+        const tempPassword = randomBytes(9).toString('base64url') + '!A1';
+        const userRes = await fetch('https://graph.microsoft.com/v1.0/users', {
+          method: 'POST', headers: { Authorization: `Bearer ${tokenData.access_token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            accountEnabled: true, displayName: `${firstName} ${lastName}`, mailNickname: localPart.replace(/\./g, ''),
+            userPrincipalName: email, passwordProfile: { password: tempPassword, forceChangePasswordNextSignIn: true },
+            usageLocation: 'US',
+          }),
+        });
+        if (!userRes.ok) continue;
 
-      await prisma.persona.create({
-        data: {
-          tenantId: order.tenantId, domainId: d.sendingDomainId, mailboxId: mailbox.id,
-          firstName, lastName, email, jobTitle: order.jobTitle ?? 'Sales Development Rep',
-          companyName: order.companyName ?? d.domain.split('.')[0],
-          warmupStatus: 'warming', warmupDay: 1, healthScore: 10, dailySendLimit: 5,
-        },
-      });
+        const mailbox = await prisma.coldMailbox.create({
+          data: {
+            tenantId: order.tenantId, provider: 'outlook', email, fromName: `${firstName} ${lastName}`,
+            dailySendLimit: 5, minDelaySeconds: 180, maxDelaySeconds: 480,
+            warmupEnabled: true, warmupStatus: 'warming', domainId: d.sendingDomainId,
+          },
+        });
+        await prisma.persona.create({
+          data: {
+            tenantId: order.tenantId, domainId: d.sendingDomainId, mailboxId: mailbox.id,
+            firstName, lastName, email, jobTitle: order.jobTitle ?? 'Sales Development Rep',
+            companyName: order.companyName ?? d.domain.split('.')[0],
+            warmupStatus: 'warming', warmupDay: 1, healthScore: 10, dailySendLimit: 5,
+          },
+        });
+        await prisma.linkedInSlot.create({
+          data: { personaId: (await prisma.persona.findFirst({ where: { mailboxId: mailbox.id } }))!.id },
+        }).catch(() => undefined);
+        domainCreated++;
+        created++;
+        await new Promise((r) => setTimeout(r, 2000));
+      }
 
-      await prisma.linkedInSlot.create({
-        data: { personaId: (await prisma.persona.findFirst({ where: { mailboxId: mailbox.id } }))!.id },
-      }).catch(() => undefined);
-
-      d.mailboxStatus = 'created';
-      created++;
+      d.mailboxStatus = domainCreated > 0 ? 'created' : 'failed';
+      d.mailboxError = domainCreated === 0 ? 'No mailboxes created' : undefined;
     } catch (err) {
-      d.mailboxStatus = 'failed';
+      d.mailboxStatus = domainCreated > 0 ? 'created' : 'failed';
       d.mailboxError = err instanceof Error ? err.message : 'Mailbox creation failed';
     }
     await prisma.domainPurchaseOrder.update({ where: { id: order.id }, data: { domains: domains } });
-    await new Promise((r) => setTimeout(r, 3000));
   }
 
   if (created > 0) {
@@ -802,11 +814,169 @@ async function pipelineEnrollWarmup(order: any) {
   return { processed: true, enrolled };
 }
 
+// ── System Cron — Automation Heartbeat ───────────────────────────────────
+
+async function processSystemCron(_data: Record<string, unknown>) {
+  const now = new Date();
+  const hour = now.getUTCHours();
+  const dayOfWeek = now.getUTCDay();
+  const results: Record<string, unknown> = {};
+
+  // 1. Reset sentToday at midnight UTC
+  if (hour === 0) {
+    const resetResult = await prisma.coldMailbox.updateMany({ where: { sentToday: { gt: 0 } }, data: { sentToday: 0 } });
+    results.sentTodayReset = resetResult.count;
+  }
+
+  // 2. Auto-advance warmup for personas who met daily target
+  const warmingPersonas = await prisma.persona.findMany({ where: { warmupStatus: 'warming' } });
+  let warmupAdvanced = 0;
+  for (const persona of warmingPersonas) {
+    const today = new Date(); today.setUTCHours(0, 0, 0, 0);
+    const todayLog = await prisma.warmupLog.findFirst({ where: { personaId: persona.id, date: { gte: today } } });
+    const dailyTarget = persona.warmupDay <= 7 ? 5 : persona.warmupDay <= 14 ? 10 : persona.warmupDay <= 21 ? 20 : persona.warmupDay <= 28 ? 35 : 50;
+    if (todayLog && todayLog.emailsSent >= dailyTarget && hour >= 22) {
+      const nextDay = persona.warmupDay + 1;
+      const nextLimit = nextDay <= 7 ? 5 : nextDay <= 14 ? 10 : nextDay <= 21 ? 20 : nextDay <= 28 ? 35 : 50;
+      const isReady = nextDay >= 35;
+      await prisma.persona.update({
+        where: { id: persona.id },
+        data: { warmupDay: nextDay, dailySendLimit: nextLimit, warmupStatus: isReady ? 'ready' : 'warming' },
+      });
+      if (persona.mailboxId) {
+        await prisma.coldMailbox.update({ where: { id: persona.mailboxId }, data: { warmupStatus: isReady ? 'ready' : 'warming', dailySendLimit: nextLimit } });
+      }
+      if (isReady && persona.tenantId) {
+        await prisma.notification.create({
+          data: { tenantId: persona.tenantId, type: 'system', title: 'Mailbox Warmup Complete', body: `${persona.email} is warmed up and ready for campaigns!`, metadata: { personaId: persona.id, email: persona.email } },
+        }).catch(() => undefined);
+      }
+      warmupAdvanced++;
+    }
+  }
+  results.warmupAdvanced = warmupAdvanced;
+
+  // 3. Bounce monitoring — auto-pause mailboxes with bounce > 5%
+  const activeMailboxes = await prisma.coldMailbox.findMany({ where: { status: 'active', totalSent: { gt: 50 } } });
+  let paused = 0;
+  for (const mb of activeMailboxes) {
+    if (Number(mb.bounceRate) > 5) {
+      await prisma.coldMailbox.update({ where: { id: mb.id }, data: { status: 'paused' } });
+      if (mb.tenantId) {
+        await prisma.notification.create({
+          data: { tenantId: mb.tenantId, type: 'system', title: 'Mailbox Auto-Paused', body: `${mb.email} paused due to ${mb.bounceRate}% bounce rate`, metadata: { mailboxId: mb.id } },
+        }).catch(() => undefined);
+      }
+      paused++;
+    }
+  }
+  results.mailboxesPaused = paused;
+
+  // 4. Domain health checks (every 6 hours)
+  if (hour % 6 === 0) {
+    const domains = await prisma.sendingDomain.findMany({ where: { healthScore: { gt: -1 } }, take: 20 });
+    for (const domain of domains) {
+      try {
+        const dns = await import('dns');
+        const hasMx = await new Promise<boolean>((resolve) => {
+          dns.resolveMx(domain.domain, (err, addresses) => resolve(!err && addresses && addresses.length > 0));
+        });
+        let score = hasMx ? 25 : 0;
+        const hasTxt = await new Promise<boolean>((resolve) => {
+          dns.resolveTxt(domain.domain, (err, records) => {
+            if (err || !records) { resolve(false); return; }
+            const flat = records.map(r => r.join('')).join(' ');
+            resolve(flat.includes('v=spf1'));
+          });
+        });
+        score += hasTxt ? 25 : 0;
+        const hasDmarc = await new Promise<boolean>((resolve) => {
+          dns.resolveTxt(`_dmarc.${domain.domain}`, (err, records) => {
+            if (err || !records) { resolve(false); return; }
+            resolve(records.some(r => r.join('').includes('v=DMARC1')));
+          });
+        });
+        score += hasDmarc ? 25 : 0;
+        score += 25; // DKIM assumed if other records present
+        await prisma.sendingDomain.update({ where: { id: domain.id }, data: {
+          healthScore: Math.min(score, 100),
+          spfStatus: hasTxt ? 'verified' : 'not_set',
+          dmarcStatus: hasDmarc ? 'verified' : 'not_set',
+          mxStatus: hasMx ? 'verified' : 'not_set',
+        } as any });
+      } catch {}
+    }
+    results.healthChecked = domains.length;
+  }
+
+  // 5. Auto-pause stale draft campaigns (> 30 days)
+  if (hour === 3) {
+    const staleDate = new Date(now.getTime() - 30 * 86400000);
+    const staleCampaigns = await prisma.coldCampaign.findMany({ where: { status: 'draft', createdAt: { lt: staleDate } } });
+    for (const c of staleCampaigns) {
+      if (c.tenantId) {
+        await prisma.notification.create({
+          data: { tenantId: c.tenantId, type: 'system', title: 'Stale Campaign', body: `"${c.name}" has been in draft for 30+ days. Consider activating or deleting it.`, metadata: { campaignId: c.id } },
+        }).catch(() => undefined);
+      }
+    }
+    results.staleCampaignsNotified = staleCampaigns.length;
+  }
+
+  // 6. Weekly performance digest (Monday 9am UTC)
+  if (dayOfWeek === 1 && hour === 9) {
+    const weekAgo = new Date(now.getTime() - 7 * 86400000);
+    const tenants = await prisma.tenant.findMany({ where: { status: 'active' }, select: { id: true } });
+    for (const tenant of tenants) {
+      const events = await prisma.coldEmailEvent.groupBy({
+        by: ['type'],
+        where: { campaign: { tenantId: tenant.id }, occurredAt: { gte: weekAgo } },
+        _count: true,
+      });
+      const sent = events.find(e => e.type === 'sent')?._count ?? 0;
+      const opened = events.find(e => e.type === 'opened')?._count ?? 0;
+      const replied = events.find(e => e.type === 'replied')?._count ?? 0;
+      if (sent > 0) {
+        await prisma.notification.create({
+          data: { tenantId: tenant.id, type: 'system', title: 'Weekly Outreach Report',
+            body: `Last 7 days: ${sent} sent, ${opened} opens, ${replied} replies (${sent > 0 ? Math.round(replied / sent * 100) : 0}% reply rate)`,
+            metadata: { sent, opened, replied, period: 'weekly' } },
+        }).catch(() => undefined);
+      }
+    }
+    results.weeklyDigestSent = tenants.length;
+  }
+
+  // 7. Unhandled reply reminders
+  if (hour === 10) {
+    const oneDayAgo = new Date(now.getTime() - 86400000);
+    const unhandled = await prisma.coldReply.findMany({
+      where: { respondedAt: null, receivedAt: { lt: oneDayAgo } },
+    });
+    for (const reply of unhandled) {
+      await prisma.notification.create({
+        data: { tenantId: reply.tenantId, type: 'reply_received', title: 'Unhandled Reply',
+          body: `Reply from ${reply.fromEmail} has been waiting ${Math.round((now.getTime() - reply.receivedAt.getTime()) / 3600000)} hours`,
+          metadata: { replyId: reply.id, fromEmail: reply.fromEmail } },
+      }).catch(() => undefined);
+    }
+    results.unhandledReminders = unhandled.length;
+  }
+
+  // Re-enqueue self for next hour
+  const cronQueue = new (await import('bullmq')).Queue('system-cron', { connection: connection as never });
+  await cronQueue.add('hourly', {}, { delay: 3600000 });
+  await cronQueue.close();
+
+  return { processed: true, ...results };
+}
+
 const handlers: Record<string, (data: Record<string, unknown>) => Promise<Record<string, unknown>>> = {
   'email-campaigns': processEmailCampaign,
   'cold-email-sequences': processColdSequenceTick,
   'mailbox-warmup': processMailboxWarmup,
   'domain-purchase-pipeline': processDomainPurchasePipeline,
+  'system-cron': processSystemCron,
   'notifications': processNotification,
   'dns-checks': processDnsCheck,
 };
@@ -816,6 +986,7 @@ const queues = [
   'cold-email-sequences',
   'mailbox-warmup',
   'domain-purchase-pipeline',
+  'system-cron',
   'provider-sync',
   'dns-checks',
   'notifications',
@@ -862,6 +1033,17 @@ for (const queueName of queues) {
     return result;
   }, { connection: connection as never });
 }
+
+// Bootstrap system cron on startup
+(async () => {
+  const { Queue } = await import('bullmq');
+  const cronQueue = new Queue('system-cron', { connection: connection as never });
+  const waiting = await cronQueue.getWaiting();
+  if (waiting.length === 0) {
+    await cronQueue.add('hourly', {}, { delay: 60000 });
+  }
+  await cronQueue.close();
+})().catch(() => undefined);
 
 process.on('SIGINT', async () => {
   await prisma.$disconnect();

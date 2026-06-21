@@ -279,6 +279,98 @@ export class EmailFinderController {
   }
 }
 
+// ── Reply Inbox ──
+
+@Controller('cold-email/replies')
+@RequireService('cold_email')
+@UseGuards(JwtAuthGuard, ServiceAccessGuard)
+export class ColdReplyController {
+  constructor(private readonly coldEmail: ColdEmailService) {}
+
+  @Get()
+  list(@CurrentUser() user: AuthenticatedUser, @Query() query: Record<string, string>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.coldEmail.listReplies(tenantId(user, selectedTenantId), query);
+  }
+
+  @Get('stats')
+  stats(@CurrentUser() user: AuthenticatedUser, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.coldEmail.getReplyStats(tenantId(user, selectedTenantId));
+  }
+
+  @Patch(':id/categorize')
+  categorize(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.coldEmail.categorizeReply(tenantId(user, selectedTenantId), id, body);
+  }
+
+  @Patch(':id/assign')
+  assign(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.coldEmail.assignReply(tenantId(user, selectedTenantId), id, body);
+  }
+
+  @Post(':id/responded')
+  markResponded(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.coldEmail.markReplyResponded(tenantId(user, selectedTenantId), id);
+  }
+
+  @Post(':id/create-deal')
+  createDeal(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.coldEmail.createDealFromReply(tenantId(user, selectedTenantId), id, user.id);
+  }
+}
+
+// ── Sequence Templates ──
+
+@Controller('cold-email/sequence-templates')
+@RequireService('cold_email')
+@UseGuards(JwtAuthGuard, ServiceAccessGuard)
+export class ColdSequenceTemplateController {
+  constructor(private readonly coldEmail: ColdEmailService) {}
+
+  @Get()
+  list(@CurrentUser() user: AuthenticatedUser, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.coldEmail.listSequenceTemplates(tenantId(user, selectedTenantId));
+  }
+
+  @Post()
+  create(@CurrentUser() user: AuthenticatedUser, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.coldEmail.createSequenceTemplate(tenantId(user, selectedTenantId), user.id, body);
+  }
+
+  @Delete(':id')
+  remove(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.coldEmail.deleteSequenceTemplate(tenantId(user, selectedTenantId), id);
+  }
+}
+
+// ── Suppression List ──
+
+@Controller('cold-email/suppressions')
+@RequireService('cold_email')
+@UseGuards(JwtAuthGuard, ServiceAccessGuard)
+export class ColdSuppressionController {
+  constructor(private readonly coldEmail: ColdEmailService) {}
+
+  @Get()
+  list(@CurrentUser() user: AuthenticatedUser, @Query() query: Record<string, string>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.coldEmail.listSuppressions(tenantId(user, selectedTenantId), query);
+  }
+
+  @Post()
+  add(@CurrentUser() user: AuthenticatedUser, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.coldEmail.addSuppression(tenantId(user, selectedTenantId), body);
+  }
+
+  @Post('bulk')
+  bulkAdd(@CurrentUser() user: AuthenticatedUser, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.coldEmail.bulkAddSuppressions(tenantId(user, selectedTenantId), body);
+  }
+
+  @Delete(':id')
+  remove(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.coldEmail.removeSuppression(tenantId(user, selectedTenantId), id);
+  }
+}
+
 // ── Self-service Integrations (client-side) ──
 
 @Controller('cold-email/integrations')

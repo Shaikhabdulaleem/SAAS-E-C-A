@@ -123,6 +123,8 @@ function buildNavGroups(user: User | null, activeServices: string[] = [], isImpe
         { name: 'Domain Health', href: '/cold-email/domain-health', icon: HeartPulse },
         { name: 'Warmup', href: '/cold-email/warmup', icon: Flame },
         { name: 'Email Finder', href: '/cold-email/email-finder', icon: Search },
+        { name: 'Reply Inbox', href: '/cold-email/replies', icon: Mail },
+        { name: 'Suppressions', href: '/cold-email/suppressions', icon: Ban },
       ],
     });
   }

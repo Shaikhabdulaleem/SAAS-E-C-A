@@ -9,6 +9,9 @@ import {
   ColdSendEngineController,
   ColdEmailWebhookController,
   EmailFinderController,
+  ColdReplyController,
+  ColdSequenceTemplateController,
+  ColdSuppressionController,
   ColdEmailIntegrationsController,
 } from './cold-email.controller';
 import { ColdEmailService } from './cold-email.service';
@@ -24,6 +27,9 @@ import { EncryptionService } from '../tenants/encryption.service';
     ColdSendEngineController,
     ColdEmailWebhookController,
     EmailFinderController,
+    ColdReplyController,
+    ColdSequenceTemplateController,
+    ColdSuppressionController,
     ColdEmailIntegrationsController,
   ],
   providers: [ColdEmailService, EncryptionService],

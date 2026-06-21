@@ -69,6 +69,7 @@ export function DomainPurchase() {
   const [order, setOrder] = useState<PurchaseOrder | null>(null);
   const [baseName, setBaseName] = useState('');
   const [quantity, setQuantity] = useState('5');
+  const [mailboxesPerDomain, setMailboxesPerDomain] = useState('1');
   const [registrar, setRegistrar] = useState('');
   const [emailFormat, setEmailFormat] = useState('firstname.lastname');
   const [companyName, setCompanyName] = useState('');
@@ -114,7 +115,7 @@ export function DomainPurchase() {
     try {
       const o = await apiRequest<PurchaseOrder>('/provisioning/domain-purchase/orders', {
         method: 'POST',
-        body: JSON.stringify({ baseName, quantity: Number(quantity), registrarProvider: registrar, emailFormat, companyName: companyName || undefined, jobTitle, providerCredentialId: providerId || undefined }),
+        body: JSON.stringify({ baseName, quantity: Number(quantity), mailboxesPerDomain: Number(mailboxesPerDomain), registrarProvider: registrar, emailFormat, companyName: companyName || undefined, jobTitle, providerCredentialId: providerId || undefined }),
       });
       setOrderId(o.id); setOrder(o); setStep(2); pollOrder(o.id);
     } catch (err) {
@@ -193,11 +194,19 @@ export function DomainPurchase() {
                 <p className="text-xs text-muted-foreground">We'll generate variations like shayanmail.com, getshayanreach.io, etc.</p>
               </div>
               <div className="space-y-1.5">
-                <Label>Quantity</Label>
+                <Label>Domains</Label>
                 <Select value={quantity} onValueChange={setQuantity}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>{['3', '5', '10', '15', '20'].map((n) => <SelectItem key={n} value={n}>{n} domains</SelectItem>)}</SelectContent>
                 </Select>
+              </div>
+              <div className="space-y-1.5">
+                <Label>Mailboxes per Domain</Label>
+                <Select value={mailboxesPerDomain} onValueChange={setMailboxesPerDomain}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>{['1', '2', '3', '5'].map((n) => <SelectItem key={n} value={n}>{n} mailbox{n !== '1' ? 'es' : ''}</SelectItem>)}</SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">{Number(quantity) * Number(mailboxesPerDomain)} total mailboxes = {Number(quantity) * Number(mailboxesPerDomain) * 50} emails/day at full warmup</p>
               </div>
               <div className="space-y-1.5">
                 <Label>Domain Registrar *</Label>

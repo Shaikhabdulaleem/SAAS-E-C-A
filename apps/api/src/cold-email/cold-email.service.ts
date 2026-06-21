@@ -1160,6 +1160,139 @@ export class ColdEmailService {
   // Self-Service Integrations (Registrars + Cloudflare)
   // ---------------------------------------------------------------------------
 
+  // ---------------------------------------------------------------------------
+  // Reply Inbox (Batch 3)
+  // ---------------------------------------------------------------------------
+
+  async listReplies(tenantId: string, query: Record<string, string>) {
+    const { skip, take } = this.page(query);
+    const where: any = { tenantId };
+    if (query.category && query.category !== 'all') where.category = query.category;
+    if (query.campaignId) where.campaignId = query.campaignId;
+    if (query.unhandled === 'true') where.respondedAt = null;
+    const [replies, total] = await Promise.all([
+      this.prisma.coldReply.findMany({ where, orderBy: { receivedAt: 'desc' }, skip, take }),
+      this.prisma.coldReply.count({ where }),
+    ]);
+    return { data: replies, meta: this.pageMeta(query, total) };
+  }
+
+  async categorizeReply(tenantId: string, replyId: string, body: Record<string, unknown>) {
+    const category = this.requiredString(body.category, 'category');
+    const reply = await this.prisma.coldReply.findFirst({ where: { id: replyId, tenantId } });
+    if (!reply) throw new NotFoundException('Reply not found');
+    return this.prisma.coldReply.update({ where: { id: replyId }, data: { category } });
+  }
+
+  async assignReply(tenantId: string, replyId: string, body: Record<string, unknown>) {
+    const assignedTo = this.requiredString(body.assignedTo, 'assignedTo');
+    return this.prisma.coldReply.update({ where: { id: replyId }, data: { assignedTo } });
+  }
+
+  async markReplyResponded(tenantId: string, replyId: string) {
+    return this.prisma.coldReply.update({ where: { id: replyId }, data: { respondedAt: new Date() } });
+  }
+
+  async createDealFromReply(tenantId: string, replyId: string, userId: string) {
+    const reply = await this.prisma.coldReply.findFirst({ where: { id: replyId, tenantId } });
+    if (!reply) throw new NotFoundException('Reply not found');
+    const prospect = reply.prospectId ? await this.prisma.coldProspect.findUnique({ where: { id: reply.prospectId } }) : null;
+    const deal = await this.prisma.deal.create({
+      data: {
+        tenantId, title: `Deal from ${reply.fromEmail}`,
+        value: 0, currency: 'USD', stage: 'New', status: 'open',
+        createdBy: userId,
+      },
+    });
+    await this.prisma.coldReply.update({ where: { id: replyId }, data: { crmDealId: deal.id, respondedAt: new Date() } });
+    if (reply.campaignId) {
+      await this.prisma.coldCampaign.update({ where: { id: reply.campaignId }, data: { dealsCreated: { increment: 1 } } }).catch(() => undefined);
+    }
+    return deal;
+  }
+
+  async getReplyStats(tenantId: string) {
+    const [total, unhandled, interested, notInterested] = await Promise.all([
+      this.prisma.coldReply.count({ where: { tenantId } }),
+      this.prisma.coldReply.count({ where: { tenantId, respondedAt: null } }),
+      this.prisma.coldReply.count({ where: { tenantId, category: 'interested' } }),
+      this.prisma.coldReply.count({ where: { tenantId, category: 'not_interested' } }),
+    ]);
+    return { total, unhandled, interested, notInterested };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Campaign Templates (Batch 4)
+  // ---------------------------------------------------------------------------
+
+  async listSequenceTemplates(tenantId: string) {
+    return this.prisma.coldSequenceTemplate.findMany({
+      where: { OR: [{ tenantId }, { isPublic: true }] },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  async createSequenceTemplate(tenantId: string, userId: string, body: Record<string, unknown>) {
+    const name = this.requiredString(body.name, 'name');
+    const description = this.optionalString(body.description);
+    const category = this.optionalString(body.category) ?? 'general';
+    const steps = Array.isArray(body.steps) ? body.steps : [];
+    return this.prisma.coldSequenceTemplate.create({
+      data: { tenantId, name, description, category, steps: steps as any, createdBy: userId },
+    });
+  }
+
+  async deleteSequenceTemplate(tenantId: string, templateId: string) {
+    await this.prisma.coldSequenceTemplate.deleteMany({ where: { id: templateId, tenantId } });
+    return { success: true };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Suppression Management (Batch 6)
+  // ---------------------------------------------------------------------------
+
+  async listSuppressions(tenantId: string, query: Record<string, string>) {
+    const { skip, take } = this.page(query);
+    const where: any = { tenantId };
+    if (query.source) where.source = query.source;
+    if (query.search) where.email = { contains: query.search, mode: 'insensitive' };
+    const [entries, total] = await Promise.all([
+      this.prisma.suppressionEntry.findMany({ where, orderBy: { createdAt: 'desc' }, skip, take }),
+      this.prisma.suppressionEntry.count({ where }),
+    ]);
+    return { data: entries, meta: this.pageMeta(query, total) };
+  }
+
+  async addSuppression(tenantId: string, body: Record<string, unknown>) {
+    const email = this.requiredString(body.email, 'email').toLowerCase();
+    return this.prisma.suppressionEntry.upsert({
+      where: { tenantId_email: { tenantId, email } },
+      update: { source: 'manual' },
+      create: { tenantId, email, source: 'manual' },
+    });
+  }
+
+  async bulkAddSuppressions(tenantId: string, body: Record<string, unknown>) {
+    const emails = Array.isArray(body.emails) ? body.emails.filter((e): e is string => typeof e === 'string').map(e => e.trim().toLowerCase()) : [];
+    let created = 0;
+    for (const email of emails) {
+      try {
+        await this.prisma.suppressionEntry.create({ data: { tenantId, email, source: 'manual' } });
+        created++;
+      } catch { /* duplicate */ }
+    }
+    return { created, total: emails.length };
+  }
+
+  async removeSuppression(tenantId: string, suppressionId: string) {
+    await this.prisma.suppressionEntry.deleteMany({ where: { id: suppressionId, tenantId } });
+    return { success: true };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Self-Service Integrations
+  // ---------------------------------------------------------------------------
+
   private readonly INTEGRATION_PLATFORMS = ['namecheap', 'porkbun', 'dynadot', 'godaddy', 'cloudflare', 'apollo'];
 
   async listIntegrations(tenantId: string) {

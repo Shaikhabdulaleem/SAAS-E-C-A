@@ -1398,6 +1398,7 @@ export class ProvisioningService {
     const quantity = this.optionalNumber(body.quantity, 5) ?? 5;
     const registrarProvider = this.optionalString(body.registrarProvider) ?? 'namecheap';
     const emailFormat = this.optionalString(body.emailFormat) ?? 'firstname.lastname';
+    const mailboxesPerDomain = this.optionalNumber(body.mailboxesPerDomain, 1) ?? 1;
     const companyName = this.optionalString(body.companyName);
     const jobTitle = this.optionalString(body.jobTitle) ?? 'Sales Development Rep';
     const providerCredentialId = this.optionalString(body.providerCredentialId);
@@ -1424,7 +1425,7 @@ export class ProvisioningService {
 
     const order = await this.prisma.domainPurchaseOrder.create({
       data: {
-        tenantId, baseName, quantity, registrarProvider, status: 'generating',
+        tenantId, baseName, quantity, mailboxesPerDomain, registrarProvider, status: 'generating',
         domains: domainItems as any, emailFormat, companyName, jobTitle,
         providerCredentialId, createdBy: userId,
       },
