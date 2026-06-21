@@ -278,3 +278,27 @@ export class EmailFinderController {
     return this.coldEmail.saveEmailFinderResultsToCrm(tenantId(user, selectedTenantId), user.id, body);
   }
 }
+
+// ── Self-service Integrations (client-side) ──
+
+@Controller('cold-email/integrations')
+@RequireService('cold_email')
+@UseGuards(JwtAuthGuard, ServiceAccessGuard)
+export class ColdEmailIntegrationsController {
+  constructor(private readonly coldEmail: ColdEmailService) {}
+
+  @Get()
+  list(@CurrentUser() user: AuthenticatedUser, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.coldEmail.listIntegrations(tenantId(user, selectedTenantId));
+  }
+
+  @Post()
+  connect(@CurrentUser() user: AuthenticatedUser, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.coldEmail.connectIntegration(tenantId(user, selectedTenantId), body);
+  }
+
+  @Delete(':platformKey')
+  disconnect(@CurrentUser() user: AuthenticatedUser, @Param('platformKey') platformKey: string, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.coldEmail.disconnectIntegration(tenantId(user, selectedTenantId), platformKey);
+  }
+}

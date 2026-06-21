@@ -273,6 +273,7 @@ model Tenant {
   dnsProvisioningLogs      DnsProvisioningLog[]
   callSessions         CallSession[]
   domainPurchaseOrders DomainPurchaseOrder[]
+  coldReplies          ColdReply[]
   callRecordings       CallRecording[]
   callTranscripts      CallTranscript[]
   callInsights         CallInsight[]
@@ -1360,6 +1361,9 @@ model SendingDomain {
   healthScore          Int             @default(0)
   blacklistStatus      String          @default("clean")
   blacklistCheckedAt   DateTime?
+  purchasedAt          DateTime?
+  currentDailyCap      Int             @default(50)
+  lastRestedAt         DateTime?
   lastCheckedAt        DateTime?
   targetDailyVolume    Int?
   requiredMailboxes    Int?
@@ -1456,6 +1460,7 @@ model ColdProspect {
   customVar4      String?
   customVar5      String?
   validationStatus ProspectValidation @default(pending)
+  score            Int                 @default(0)
   createdAt       DateTime            @default(now())
   list            ColdProspectList    @relation(fields: [listId], references: [id], onDelete: Cascade)
   contact         Contact?            @relation(fields: [contactId], references: [id], onDelete: SetNull)
@@ -1485,6 +1490,8 @@ model ColdCampaign {
   positiveReplyCount Int                 @default(0)
   bounceCount       Int                  @default(0)
   unsubCount        Int                  @default(0)
+  pipelineValue     Decimal              @default(0) @db.Decimal(12, 2)
+  dealsCreated      Int                  @default(0)
   scheduledAt       DateTime?
   createdBy         String
   createdAt         DateTime             @default(now())
@@ -1809,8 +1816,10 @@ model DomainPurchaseOrder {
   domains               Json                  @default("[]")
   totalCost             Decimal               @default(0) @db.Decimal(12, 2)
   emailFormat           String                @default("firstname.lastname")
+  mailboxesPerDomain    Int                   @default(1)
   companyName           String?
   jobTitle              String?
+  whoisContact          Json?
   providerCredentialId  String?
   lastError             String?
   createdBy             String
@@ -1822,6 +1831,39 @@ model DomainPurchaseOrder {
 
   @@index([tenantId, status])
   @@index([tenantId, createdAt])
+}
+
+model ColdReply {
+  id            String   @id @default(uuid())
+  tenantId      String
+  campaignId    String?
+  prospectId    String?
+  mailboxId     String?
+  fromEmail     String
+  subject       String   @default("")
+  body          String   @default("")
+  category      String   @default("uncategorized")
+  assignedTo    String?
+  respondedAt   DateTime?
+  crmDealId     String?
+  receivedAt    DateTime @default(now())
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, category])
+  @@index([tenantId, receivedAt])
+}
+
+model ColdSequenceTemplate {
+  id          String   @id @default(uuid())
+  tenantId    String?
+  name        String
+  description String?
+  category    String   @default("general")
+  steps       Json     @default("[]")
+  isPublic    Boolean  @default(false)
+  createdBy   String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }
 
 model CallSession {

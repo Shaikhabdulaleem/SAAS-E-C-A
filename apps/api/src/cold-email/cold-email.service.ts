@@ -1155,4 +1155,44 @@ export class ColdEmailService {
 
     return { created, skipped };
   }
+
+  // ---------------------------------------------------------------------------
+  // Self-Service Integrations (Registrars + Cloudflare)
+  // ---------------------------------------------------------------------------
+
+  private readonly INTEGRATION_PLATFORMS = ['namecheap', 'porkbun', 'dynadot', 'godaddy', 'cloudflare', 'apollo'];
+
+  async listIntegrations(tenantId: string) {
+    const integrations = await this.prisma.tenantIntegration.findMany({
+      where: { tenantId, platformKey: { in: this.INTEGRATION_PLATFORMS }, isActive: true },
+    });
+    return integrations.map((i) => ({
+      id: i.id,
+      platformKey: i.platformKey,
+      isActive: i.isActive,
+      connectedAt: i.createdAt,
+      maskedKey: '****' + this.encryption.decrypt(i.apiKeyCipher).slice(-4),
+    }));
+  }
+
+  async connectIntegration(tenantId: string, body: Record<string, unknown>) {
+    const platformKey = this.requiredString(body.platformKey, 'platformKey');
+    if (!this.INTEGRATION_PLATFORMS.includes(platformKey)) throw new BadRequestException(`Unsupported platform: ${platformKey}`);
+    const credentials = body.credentials ?? body.apiKey;
+    if (!credentials) throw new BadRequestException('credentials or apiKey is required');
+    const toEncrypt = typeof credentials === 'string' ? credentials : JSON.stringify(credentials);
+    const apiKeyCipher = this.encryption.encrypt(toEncrypt);
+
+    const integration = await this.prisma.tenantIntegration.upsert({
+      where: { id: `${tenantId}_${platformKey}` },
+      update: { apiKeyCipher, isActive: true },
+      create: { tenantId, platformKey, apiKeyCipher, isActive: true },
+    });
+    return { id: integration.id, platformKey, isActive: true, connectedAt: integration.createdAt };
+  }
+
+  async disconnectIntegration(tenantId: string, platformKey: string) {
+    await this.prisma.tenantIntegration.deleteMany({ where: { tenantId, platformKey } });
+    return { success: true };
+  }
 }

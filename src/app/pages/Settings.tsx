@@ -498,43 +498,75 @@ export function Settings() {
   );
 }
 
+interface IntegrationConfig {
+  key: string;
+  name: string;
+  description: string;
+  color: string;
+  bg: string;
+  fields: Array<{ name: string; label: string; type: 'text' | 'password' }>;
+}
+
+const INTEGRATION_CONFIGS: IntegrationConfig[] = [
+  { key: 'apollo', name: 'Apollo.io', description: 'Find prospect emails by company, domain, or job title', color: 'text-indigo-600', bg: 'bg-indigo-50', fields: [{ name: 'apiKey', label: 'API Key', type: 'password' }] },
+  { key: 'cloudflare', name: 'Cloudflare', description: 'DNS management for sending domains (SPF, DKIM, DMARC, MX)', color: 'text-orange-600', bg: 'bg-orange-50', fields: [{ name: 'apiKey', label: 'API Token', type: 'password' }] },
+  { key: 'namecheap', name: 'Namecheap', description: 'Domain registration and nameserver management', color: 'text-red-600', bg: 'bg-red-50', fields: [{ name: 'apiKey', label: 'API Key', type: 'password' }, { name: 'apiUser', label: 'API User', type: 'text' }, { name: 'userName', label: 'Username', type: 'text' }, { name: 'clientIp', label: 'Whitelisted IP', type: 'text' }] },
+  { key: 'porkbun', name: 'Porkbun', description: 'Domain registration with competitive pricing', color: 'text-pink-600', bg: 'bg-pink-50', fields: [{ name: 'apikey', label: 'API Key', type: 'password' }, { name: 'secretapikey', label: 'Secret API Key', type: 'password' }] },
+  { key: 'dynadot', name: 'Dynadot', description: 'Domain registration and management', color: 'text-blue-600', bg: 'bg-blue-50', fields: [{ name: 'apiKey', label: 'API Key', type: 'password' }] },
+  { key: 'godaddy', name: 'GoDaddy', description: 'Domain registration and DNS management', color: 'text-green-600', bg: 'bg-green-50', fields: [{ name: 'key', label: 'API Key', type: 'password' }, { name: 'secret', label: 'API Secret', type: 'password' }] },
+];
+
 function IntegrationsTab() {
-  const [apiKey, setApiKey] = useState('');
-  const [credential, setCredential] = useState<{ maskedKey: string; isActive: boolean; connectedAt: string } | null>(null);
+  const [integrations, setIntegrations] = useState<Record<string, { maskedKey: string; connectedAt: string }>>({});
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState('');
+  const [forms, setForms] = useState<Record<string, Record<string, string>>>({});
+  const [saving, setSaving] = useState<string | null>(null);
+  const [messages, setMessages] = useState<Record<string, string>>({});
 
   useEffect(() => {
-    apiRequest<any>('/cold-email/email-finder/credential')
-      .then(data => { if (data) setCredential(data); })
+    apiRequest<Array<{ platformKey: string; maskedKey: string; connectedAt: string }>>('/cold-email/integrations')
+      .then(data => {
+        const map: Record<string, any> = {};
+        (Array.isArray(data) ? data : []).forEach(i => { map[i.platformKey] = i; });
+        setIntegrations(map);
+      })
       .catch(() => {})
       .finally(() => setLoading(false));
   }, []);
 
-  const handleConnect = async () => {
-    if (!apiKey.trim()) return;
-    setSaving(true);
+  const handleConnect = async (config: IntegrationConfig) => {
+    const formData = forms[config.key] ?? {};
+    const hasAllFields = config.fields.every(f => formData[f.name]?.trim());
+    if (!hasAllFields) return;
+    setSaving(config.key);
+    setMessages(m => ({ ...m, [config.key]: '' }));
     try {
-      await apiRequest('/cold-email/email-finder/credential', { method: 'POST', body: JSON.stringify({ apiKey: apiKey.trim(), providerType: 'apollo' }) });
-      const data = await apiRequest<any>('/cold-email/email-finder/credential');
-      setCredential(data);
-      setApiKey('');
-      setMessage('Apollo.io connected successfully');
+      const credentials = config.fields.length === 1 ? formData[config.fields[0].name] : formData;
+      await apiRequest('/cold-email/integrations', { method: 'POST', body: JSON.stringify({ platformKey: config.key, credentials }) });
+      const data = await apiRequest<Array<{ platformKey: string; maskedKey: string; connectedAt: string }>>('/cold-email/integrations');
+      const map: Record<string, any> = {};
+      (Array.isArray(data) ? data : []).forEach(i => { map[i.platformKey] = i; });
+      setIntegrations(map);
+      setForms(f => ({ ...f, [config.key]: {} }));
+      setMessages(m => ({ ...m, [config.key]: `${config.name} connected` }));
     } catch (err) {
-      setMessage(err instanceof Error ? err.message : 'Failed to connect');
+      setMessages(m => ({ ...m, [config.key]: err instanceof Error ? err.message : 'Failed' }));
     } finally {
-      setSaving(false);
+      setSaving(null);
     }
   };
 
-  const handleDisconnect = async () => {
-    if (!window.confirm('Disconnect Apollo.io? You will need to re-enter your API key.')) return;
+  const handleDisconnect = async (config: IntegrationConfig) => {
+    if (!window.confirm(`Disconnect ${config.name}?`)) return;
     try {
-      await apiRequest('/cold-email/email-finder/credential', { method: 'DELETE' });
-      setCredential(null);
-      setMessage('Disconnected');
+      await apiRequest(`/cold-email/integrations/${config.key}`, { method: 'DELETE' });
+      setIntegrations(prev => { const n = { ...prev }; delete n[config.key]; return n; });
+      setMessages(m => ({ ...m, [config.key]: 'Disconnected' }));
     } catch {}
+  };
+
+  const setField = (key: string, field: string, value: string) => {
+    setForms(f => ({ ...f, [key]: { ...(f[key] ?? {}), [field]: value } }));
   };
 
   if (loading) return <p className="text-sm text-gray-500 py-8 text-center">Loading...</p>;
@@ -543,45 +575,52 @@ function IntegrationsTab() {
     <div className="space-y-6">
       <div>
         <h2 className="text-lg font-semibold text-gray-900">Integrations</h2>
-        <p className="text-sm text-gray-500">Connect external services for email finding and enrichment.</p>
+        <p className="text-sm text-gray-500">Connect domain registrars, DNS providers, and email enrichment services.</p>
       </div>
-      <div className="bg-white rounded-xl border border-gray-200 p-6 space-y-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="p-2.5 rounded-xl bg-indigo-50">
-              <Puzzle className="h-5 w-5 text-indigo-600" />
-            </div>
-            <div>
-              <h3 className="font-medium text-gray-900">Apollo.io</h3>
-              <p className="text-xs text-gray-500">Find prospect emails by company, domain, or job title</p>
-            </div>
-          </div>
-          {credential ? (
-            <span className="px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700">Connected</span>
-          ) : (
-            <span className="px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-500">Not Connected</span>
-          )}
-        </div>
-        {credential ? (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between px-4 py-3 bg-gray-50 rounded-lg">
-              <div>
-                <p className="text-sm text-gray-900">API Key: <span className="font-mono text-gray-500">{credential.maskedKey}</span></p>
-                <p className="text-xs text-gray-500">Connected {new Date(credential.connectedAt).toLocaleDateString()}</p>
+      {INTEGRATION_CONFIGS.map(config => {
+        const connected = integrations[config.key];
+        const formData = forms[config.key] ?? {};
+        const msg = messages[config.key];
+        return (
+          <div key={config.key} className="bg-white rounded-xl border border-gray-200 p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className={`p-2.5 rounded-xl ${config.bg}`}><Puzzle className={`h-5 w-5 ${config.color}`} /></div>
+                <div>
+                  <h3 className="font-medium text-gray-900">{config.name}</h3>
+                  <p className="text-xs text-gray-500">{config.description}</p>
+                </div>
               </div>
-              <button onClick={() => void handleDisconnect()} className="text-xs text-red-600 hover:underline">Disconnect</button>
+              {connected ? (
+                <span className="px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700">Connected</span>
+              ) : (
+                <span className="px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-500">Not Connected</span>
+              )}
             </div>
+            {connected ? (
+              <div className="flex items-center justify-between px-4 py-3 bg-gray-50 rounded-lg">
+                <div>
+                  <p className="text-sm text-gray-900">Key: <span className="font-mono text-gray-500">{connected.maskedKey}</span></p>
+                  <p className="text-xs text-gray-500">Connected {new Date(connected.connectedAt).toLocaleDateString()}</p>
+                </div>
+                <button onClick={() => void handleDisconnect(config)} className="text-xs text-red-600 hover:underline">Disconnect</button>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <div className={`grid gap-2 ${config.fields.length > 2 ? 'grid-cols-2' : 'grid-cols-1'}`}>
+                  {config.fields.map(f => (
+                    <input key={f.name} type={f.type} placeholder={f.label} value={formData[f.name] ?? ''} onChange={e => setField(config.key, f.name, e.target.value)} className="px-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                  ))}
+                </div>
+                <button onClick={() => void handleConnect(config)} disabled={saving === config.key || !config.fields.every(f => formData[f.name]?.trim())} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm">
+                  {saving === config.key ? 'Connecting...' : 'Connect'}
+                </button>
+              </div>
+            )}
+            {msg && <p className={`text-xs ${msg.includes('Failed') ? 'text-red-600' : 'text-emerald-600'}`}>{msg}</p>}
           </div>
-        ) : (
-          <div className="flex gap-2">
-            <input type="password" placeholder="Enter Apollo.io API Key" value={apiKey} onChange={e => setApiKey(e.target.value)} className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
-            <button onClick={() => void handleConnect()} disabled={saving || !apiKey.trim()} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm">
-              {saving ? 'Connecting...' : 'Connect'}
-            </button>
-          </div>
-        )}
-        {message && <p className={`text-xs ${message.includes('Failed') ? 'text-red-600' : 'text-emerald-600'}`}>{message}</p>}
-      </div>
+        );
+      })}
     </div>
   );
 }
