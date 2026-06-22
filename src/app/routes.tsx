@@ -34,7 +34,7 @@ import { WarmupDashboard } from "./pages/cold-email/WarmupDashboard";
 import { EmailFinder } from "./pages/cold-email/EmailFinder";
 import { DomainPurchase } from "./pages/cold-email/DomainPurchase";
 import { ReplyInbox } from "./pages/cold-email/ReplyInbox";
-import { Suppressions } from "./pages/cold-email/Suppressions";
+import { Suppressions as ColdEmailSuppressions } from "./pages/cold-email/Suppressions";
 import { DeliverabilityReport } from "./pages/cold-email/DeliverabilityReport";
 import { AIAssistant } from "./pages/AIAssistant";
 import { ProposalList } from "./pages/proposals/ProposalList";
@@ -118,7 +118,7 @@ export const router = createBrowserRouter([
       { path: "cold-email/email-finder", element: withService("cold_email", <EmailFinder />) },
       { path: "cold-email/domain-purchase", element: withService("cold_email", <DomainPurchase />) },
       { path: "cold-email/replies", element: withService("cold_email", <ReplyInbox />) },
-      { path: "cold-email/suppressions", element: withService("cold_email", <Suppressions />) },
+      { path: "cold-email/suppressions", element: withService("cold_email", <ColdEmailSuppressions />) },
       { path: "cold-email/deliverability", element: withService("cold_email", <DeliverabilityReport />) },
       { path: "ai-assistant", element: withService("ai_assistant", <AIAssistant />) },
       { path: "settings", Component: Settings },
