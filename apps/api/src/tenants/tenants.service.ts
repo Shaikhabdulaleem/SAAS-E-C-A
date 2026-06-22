@@ -17,16 +17,42 @@ export class TenantsService {
     private readonly passwords: PasswordService,
   ) {}
 
-  async list() {
-    const tenants = await this.prisma.tenant.findMany({
-      include: {
-        enabledServices: true,
-        integrations: true,
-      },
-      orderBy: { createdAt: 'desc' },
-    });
+  async list(query: Record<string, string> = {}) {
+    const page = Math.max(Number(query.page ?? 1), 1);
+    const pageSize = Math.min(Math.max(Number(query.pageSize ?? 20), 1), 100);
+    const sortBy = query.sortBy || 'createdAt';
+    const sortOrder = (query.sortOrder === 'asc' ? 'asc' : 'desc') as 'asc' | 'desc';
 
-    return tenants.map((tenant) => this.toTenantResponse(tenant));
+    const allowedSortFields = ['companyName', 'mrr', 'createdAt', 'status', 'seats', 'plan'];
+    const orderField = allowedSortFields.includes(sortBy) ? sortBy : 'createdAt';
+
+    const where: any = {};
+    if (query.search) {
+      where.OR = [
+        { companyName: { contains: query.search, mode: 'insensitive' } },
+        { contactName: { contains: query.search, mode: 'insensitive' } },
+        { email: { contains: query.search, mode: 'insensitive' } },
+      ];
+    }
+    if (query.status && query.status !== 'all') {
+      where.status = query.status;
+    }
+
+    const [tenants, total] = await Promise.all([
+      this.prisma.tenant.findMany({
+        where,
+        include: { enabledServices: true, integrations: true },
+        orderBy: { [orderField]: sortOrder },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      this.prisma.tenant.count({ where }),
+    ]);
+
+    return {
+      items: tenants.map((tenant) => this.toTenantResponse(tenant)),
+      pagination: { page, pageSize, total },
+    };
   }
 
   async get(tenantId: string) {
@@ -141,6 +167,66 @@ export class TenantsService {
     });
 
     return this.get(tenantId);
+  }
+
+  async bulkAction(
+    ids: string[],
+    action: string,
+    params: Record<string, unknown>,
+    actorUserId: string,
+  ) {
+    if (!Array.isArray(ids) || ids.length === 0) {
+      throw new BadRequestException('No tenant IDs provided');
+    }
+
+    const validActions = ['activate', 'suspend', 'cancel', 'delete', 'change_plan'];
+    if (!validActions.includes(action)) {
+      throw new BadRequestException('Invalid bulk action');
+    }
+
+    let affected = 0;
+
+    await this.prisma.$transaction(async (tx) => {
+      if (action === 'delete') {
+        const result = await tx.tenant.deleteMany({ where: { id: { in: ids } } });
+        affected = result.count;
+      } else if (action === 'activate') {
+        const result = await tx.tenant.updateMany({
+          where: { id: { in: ids } },
+          data: { status: TenantStatus.active },
+        });
+        affected = result.count;
+      } else if (action === 'suspend') {
+        const result = await tx.tenant.updateMany({
+          where: { id: { in: ids } },
+          data: { status: TenantStatus.suspended, mrr: 0 },
+        });
+        affected = result.count;
+      } else if (action === 'cancel') {
+        const result = await tx.tenant.updateMany({
+          where: { id: { in: ids } },
+          data: { status: TenantStatus.cancelled, mrr: 0 },
+        });
+        affected = result.count;
+      } else if (action === 'change_plan') {
+        const plan = this.optionalEnum(params.plan, planKeys);
+        if (!plan) throw new BadRequestException('Plan is required for change_plan action');
+        const result = await tx.tenant.updateMany({
+          where: { id: { in: ids } },
+          data: { plan: plan as PlanKey },
+        });
+        affected = result.count;
+      }
+
+      await this.audit(tx, actorUserId, null as unknown as string, 'tenant.bulk_action', {
+        action,
+        ids,
+        affected,
+        params,
+      });
+    });
+
+    return { affected };
   }
 
   async remove(tenantId: string, actorUserId: string) {

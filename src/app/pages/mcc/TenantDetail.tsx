@@ -7,7 +7,7 @@ import {
   ArrowLeft, Building2, Mail, Phone, Globe, Calendar, Users, DollarSign,
   CheckCircle2, Clock, AlertCircle, XCircle, Save, Trash2, ShieldCheck,
   Plus, X, Eye, EyeOff, TrendingDown, Plug, ToggleLeft, ToggleRight, ExternalLink,
-  UserPlus, KeyRound, Copy, Send,
+  UserPlus, KeyRound, Copy, Send, Loader2, CreditCard,
 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../../components/ui/card';
 import { Button } from '../../components/ui/button';
@@ -18,12 +18,15 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Switch } from '../../components/ui/switch';
 import { Separator } from '../../components/ui/separator';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '../../components/ui/tabs';
+import { Progress } from '../../components/ui/progress';
 import { useEffect, useState } from 'react';
 import { apiRequest } from '../../lib/api';
 
 const statusConfig: Record<TenantStatus, { label: string; icon: React.ElementType; className: string }> = {
   active: { label: 'Active', icon: CheckCircle2, className: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
   trial: { label: 'Trial', icon: Clock, className: 'bg-sky-50 text-sky-700 border-sky-200' },
+  onboarding: { label: 'Onboarding', icon: Loader2, className: 'bg-blue-50 text-blue-700 border-blue-200' },
+  payment_failed: { label: 'Payment Failed', icon: CreditCard, className: 'bg-orange-50 text-orange-700 border-orange-200' },
   suspended: { label: 'Suspended', icon: AlertCircle, className: 'bg-amber-50 text-amber-700 border-amber-200' },
   cancelled: { label: 'Cancelled', icon: XCircle, className: 'bg-red-50 text-red-700 border-red-200' },
 };
@@ -80,6 +83,20 @@ export function TenantDetail() {
   const [accessError, setAccessError] = useState('');
   const [inviteResult, setInviteResult] = useState<InviteResult | null>(null);
   const [ownerLoginResult, setOwnerLoginResult] = useState<OwnerLoginResult | null>(null);
+  const [editNotes, setEditNotes] = useState(tenant?.notes ?? '');
+  const [health, setHealth] = useState<any>(null);
+  const [healthLoading, setHealthLoading] = useState(false);
+  const [usage, setUsage] = useState<any>(null);
+  const [members, setMembers] = useState<any[]>([]);
+  const [billing, setBilling] = useState<any>(null);
+  const [onboarding, setOnboarding] = useState<{ items: any[]; completed: number; total: number } | null>(null);
+  const [showNotify, setShowNotify] = useState(false);
+  const [notifyForm, setNotifyForm] = useState({ title: '', body: '' });
+  const [notifyBusy, setNotifyBusy] = useState(false);
+  const [quotas, setQuotas] = useState<any[]>([]);
+  const [tenantContracts, setTenantContracts] = useState<any[]>([]);
+  const [tenantFlags, setTenantFlags] = useState<any[]>([]);
+  const [exportBusy, setExportBusy] = useState(false);
 
   const fetchAccess = async () => {
     if (!tenant) return;
@@ -95,8 +112,25 @@ export function TenantDetail() {
     }
   };
 
+  const fetchHealth = async () => {
+    setHealthLoading(true);
+    try {
+      const data = await apiRequest(`/admin/tenants/${tenant.id}/health`);
+      setHealth(data);
+    } catch {} finally { setHealthLoading(false); }
+  };
+
   useEffect(() => {
+    if (!tenant) return;
     void fetchAccess();
+    void fetchHealth();
+    void apiRequest(`/admin/tenants/${tenant.id}/usage`).then(setUsage).catch(() => {});
+    void apiRequest(`/admin/tenants/${tenant.id}/members`).then((d: any) => setMembers(d)).catch(() => {});
+    void apiRequest(`/admin/tenants/${tenant.id}/billing`).then(setBilling).catch(() => {});
+    void apiRequest(`/admin/tenants/${tenant.id}/onboarding`).then(setOnboarding).catch(() => {});
+    void apiRequest(`/admin/tenants/${tenant.id}/quotas`).then((d: any) => setQuotas(d)).catch(() => {});
+    void apiRequest(`/admin/contracts/tenant/${tenant.id}`).then((d: any) => setTenantContracts(d)).catch(() => {});
+    void apiRequest(`/admin/feature-flags/tenant/${tenant.id}`).then((d: any) => setTenantFlags(d)).catch(() => {});
   }, [tenant?.id]);
 
   if (!tenant) {
@@ -245,6 +279,24 @@ export function TenantDetail() {
           <p className="text-sm text-muted-foreground mt-0.5">{tenant.contactName} · {tenant.email}</p>
         </div>
         <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={() => setShowNotify(true)}>
+            <Send className="h-3.5 w-3.5 mr-1.5" />Notify
+          </Button>
+          <Button variant="outline" size="sm" disabled={exportBusy} onClick={async () => {
+            setExportBusy(true);
+            try {
+              const data = await apiRequest(`/admin/tenants/${tenant.id}/export`, { method: 'POST' });
+              const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = `${tenant.companyName.replace(/\s+/g, '-')}-export.json`;
+              a.click();
+              URL.revokeObjectURL(url);
+            } catch {} finally { setExportBusy(false); }
+          }}>
+            {exportBusy ? 'Exporting...' : 'Export'}
+          </Button>
           <Button
             variant="outline"
             size="sm"
@@ -293,6 +345,34 @@ export function TenantDetail() {
             </CardContent>
           </Card>
 
+          {/* Onboarding Progress */}
+          {(tenant.status === 'onboarding' || tenant.status === 'trial') && onboarding && (
+            <Card className="p-0">
+              <CardHeader className="pb-3">
+                <CardTitle className="text-sm">Onboarding Progress</CardTitle>
+              </CardHeader>
+              <CardContent className="pt-0 space-y-3">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-muted-foreground">{onboarding.completed} of {onboarding.total} completed</span>
+                  <span className="font-medium text-foreground">{onboarding.total > 0 ? Math.round((onboarding.completed / onboarding.total) * 100) : 0}%</span>
+                </div>
+                <Progress value={onboarding.total > 0 ? (onboarding.completed / onboarding.total) * 100 : 0} />
+                <div className="space-y-1.5">
+                  {onboarding.items.map((item: any) => (
+                    <div key={item.id} className="flex items-center gap-2 text-sm">
+                      {item.completedAt ? (
+                        <CheckCircle2 className="h-4 w-4 text-emerald-500 shrink-0" />
+                      ) : (
+                        <div className="h-4 w-4 rounded-full border-2 border-muted-foreground/30 shrink-0" />
+                      )}
+                      <span className={item.completedAt ? 'text-muted-foreground line-through' : 'text-foreground'}>{item.label}</span>
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
           {/* Revenue & Expenses Summary */}
           <Card className="p-0">
             <CardHeader className="pb-3">
@@ -336,12 +416,60 @@ export function TenantDetail() {
               )}
             </CardContent>
           </Card>
+
+          {/* Trial Management */}
+          {tenant.status === 'trial' && (
+            <Card className="p-0">
+              <CardHeader className="pb-3">
+                <CardTitle className="text-sm">Trial Management</CardTitle>
+                <CardDescription>Manage trial period for this client</CardDescription>
+              </CardHeader>
+              <CardContent className="pt-0 space-y-3">
+                {(() => {
+                  const daysRemaining = tenant.trialEndsAt
+                    ? Math.max(0, Math.ceil((new Date(tenant.trialEndsAt).getTime() - Date.now()) / (1000 * 60 * 60 * 24)))
+                    : 0;
+                  return (
+                    <>
+                      <div className={`flex items-center justify-between p-3 rounded-xl border ${daysRemaining <= 3 ? 'bg-red-50 border-red-100' : 'bg-sky-50 border-sky-100'}`}>
+                        <div>
+                          <p className={`text-xs ${daysRemaining <= 3 ? 'text-red-700' : 'text-sky-700'}`}>Days Remaining</p>
+                          <p className={`text-2xl font-semibold ${daysRemaining <= 3 ? 'text-red-700' : 'text-sky-700'}`}>{daysRemaining}</p>
+                        </div>
+                        <Clock className={`h-7 w-7 ${daysRemaining <= 3 ? 'text-red-400' : 'text-sky-400'}`} />
+                      </div>
+                      {daysRemaining <= 3 && (
+                        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-50 border border-red-100 text-xs text-red-700">
+                          <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                          Trial expiring soon! Extend or convert to active.
+                        </div>
+                      )}
+                      <div className="grid grid-cols-3 gap-2">
+                        {[7, 14, 30].map(days => (
+                          <Button key={days} size="sm" variant="outline" onClick={() => {
+                            const current = tenant.trialEndsAt ? new Date(tenant.trialEndsAt) : new Date();
+                            const newDate = new Date(current.getTime() + days * 24 * 60 * 60 * 1000);
+                            updateTenant(tenant.id, { trialEndsAt: newDate.toISOString().split('T')[0] });
+                          }}>
+                            +{days}d
+                          </Button>
+                        ))}
+                      </div>
+                      <Button size="sm" className="w-full" onClick={() => updateTenant(tenant.id, { status: 'active' })}>
+                        <CheckCircle2 className="h-3.5 w-3.5 mr-1.5" />Convert to Active
+                      </Button>
+                    </>
+                  );
+                })()}
+              </CardContent>
+            </Card>
+          )}
         </div>
 
         {/* Right column */}
         <div className="lg:col-span-2 space-y-4">
           <Tabs defaultValue="services">
-            <TabsList className="h-9 w-full">
+            <TabsList className="h-9 w-full overflow-x-auto">
               <TabsTrigger value="services" className="flex-1 text-xs">
                 <ShieldCheck className="h-3.5 w-3.5 mr-1.5" />Services & Plan
               </TabsTrigger>
@@ -358,6 +486,13 @@ export function TenantDetail() {
               <TabsTrigger value="status" className="flex-1 text-xs">
                 <CheckCircle2 className="h-3.5 w-3.5 mr-1.5" />Account Status
               </TabsTrigger>
+              <TabsTrigger value="health" className="flex-1 text-xs">Health</TabsTrigger>
+              <TabsTrigger value="usage" className="flex-1 text-xs">Usage</TabsTrigger>
+              <TabsTrigger value="team" className="flex-1 text-xs">Team</TabsTrigger>
+              <TabsTrigger value="billing" className="flex-1 text-xs">Billing</TabsTrigger>
+              <TabsTrigger value="quotas" className="flex-1 text-xs">Quotas</TabsTrigger>
+              <TabsTrigger value="contracts" className="flex-1 text-xs">Contracts</TabsTrigger>
+              <TabsTrigger value="flags" className="flex-1 text-xs">Flags</TabsTrigger>
             </TabsList>
 
             {/* ── Services & Plan ── */}
@@ -826,7 +961,7 @@ export function TenantDetail() {
                 </CardHeader>
                 <CardContent className="pt-0">
                   <div className="grid grid-cols-2 gap-2">
-                    {(['active', 'trial', 'suspended', 'cancelled'] as TenantStatus[]).map(s => {
+                    {(['active', 'trial', 'onboarding', 'payment_failed', 'suspended', 'cancelled'] as TenantStatus[]).map(s => {
                       const cfg = statusConfig[s];
                       const Icon = cfg.icon;
                       return (
@@ -844,12 +979,16 @@ export function TenantDetail() {
                   <div className={`mt-4 px-4 py-3 rounded-xl border text-xs flex items-start gap-2 ${
                     tenant.status === 'active' ? 'bg-emerald-50 border-emerald-100 text-emerald-700' :
                     tenant.status === 'trial' ? 'bg-sky-50 border-sky-100 text-sky-700' :
+                    tenant.status === 'onboarding' ? 'bg-blue-50 border-blue-100 text-blue-700' :
+                    tenant.status === 'payment_failed' ? 'bg-orange-50 border-orange-100 text-orange-700' :
                     'bg-amber-50 border-amber-100 text-amber-700'
                   }`}>
                     <StatusIcon className="h-4 w-4 shrink-0 mt-0.5" />
                     <span>
                       {tenant.status === 'active' && 'Account is active — client has full access to all enabled services.'}
                       {tenant.status === 'trial' && `Account is in trial — full access until ${tenant.trialEndsAt || 'trial ends'}. Activating will start billing at $${plan.price}/mo.`}
+                      {tenant.status === 'onboarding' && 'Account is onboarding — client is completing initial setup steps.'}
+                      {tenant.status === 'payment_failed' && 'Payment has failed — follow up with the client to resolve billing.'}
                       {tenant.status === 'suspended' && 'Account suspended — client cannot log in or access any services.'}
                       {tenant.status === 'cancelled' && 'Account cancelled — all access has been revoked.'}
                     </span>
@@ -857,18 +996,428 @@ export function TenantDetail() {
                 </CardContent>
               </Card>
 
-              {tenant.notes && (
-                <Card className="p-0">
-                  <CardHeader className="pb-2"><CardTitle className="text-sm">Internal Notes</CardTitle></CardHeader>
-                  <CardContent className="pt-0">
-                    <p className="text-sm text-muted-foreground">{tenant.notes}</p>
-                  </CardContent>
-                </Card>
-              )}
+              <Card className="p-0">
+                <CardHeader className="pb-2"><CardTitle className="text-sm">Internal Notes</CardTitle></CardHeader>
+                <CardContent className="pt-0 space-y-2">
+                  <textarea
+                    value={editNotes}
+                    onChange={e => setEditNotes(e.target.value)}
+                    placeholder="Internal notes about this client..."
+                    className="w-full px-3 py-2 text-sm bg-muted/50 border border-border rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-primary/30 min-h-[72px]"
+                  />
+                  {editNotes !== (tenant.notes ?? '') && (
+                    <div className="flex justify-end">
+                      <Button size="sm" onClick={() => updateTenant(tenant.id, { notes: editNotes })}>
+                        <Save className="h-3.5 w-3.5 mr-1.5" />Save Notes
+                      </Button>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            </TabsContent>
+
+            {/* ── Health ── */}
+            <TabsContent value="health" className="space-y-4 mt-4">
+              <Card className="p-0">
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm">Client Health Score</CardTitle>
+                  <CardDescription>Engagement and adoption metrics</CardDescription>
+                </CardHeader>
+                <CardContent className="pt-0 space-y-4">
+                  {healthLoading ? (
+                    <div className="text-center py-8 text-muted-foreground text-sm">Loading health data...</div>
+                  ) : health ? (
+                    <>
+                      <div className="flex items-center justify-between p-4 rounded-xl border">
+                        <div>
+                          <p className="text-xs text-muted-foreground">Health Score</p>
+                          <p className="text-3xl font-bold">{health.healthScore}</p>
+                        </div>
+                        <div className={`text-sm font-bold px-3 py-1.5 rounded-lg ${
+                          health.healthScore >= 70 ? 'bg-emerald-100 text-emerald-700' :
+                          health.healthScore >= 40 ? 'bg-amber-100 text-amber-700' :
+                          'bg-red-100 text-red-700'
+                        }`}>
+                          {health.healthScore >= 70 ? 'Healthy' : health.healthScore >= 40 ? 'At Risk' : 'Critical'}
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="p-3 rounded-xl bg-muted/40 border border-border">
+                          <p className="text-xs text-muted-foreground">Last Login</p>
+                          <p className="text-sm font-medium">{health.lastLogin ? new Date(health.lastLogin).toLocaleDateString() : 'Never'}</p>
+                        </div>
+                        <div className="p-3 rounded-xl bg-muted/40 border border-border">
+                          <p className="text-xs text-muted-foreground">Active Users (7d)</p>
+                          <p className="text-sm font-medium">{health.activeUsersLast7Days}</p>
+                        </div>
+                        <div className="p-3 rounded-xl bg-muted/40 border border-border">
+                          <p className="text-xs text-muted-foreground">Feature Adoption</p>
+                          <p className="text-sm font-medium">{health.featureAdoption}%</p>
+                        </div>
+                        <div className="p-3 rounded-xl bg-muted/40 border border-border">
+                          <p className="text-xs text-muted-foreground">Services Used</p>
+                          <p className="text-sm font-medium">{health.servicesUsed} / {health.servicesEnabled}</p>
+                        </div>
+                      </div>
+                      <div>
+                        <p className="text-xs text-muted-foreground mb-2">Data Volumes</p>
+                        <div className="grid grid-cols-2 gap-2">
+                          {Object.entries(health.dataVolumes).map(([key, val]) => (
+                            <div key={key} className="flex items-center justify-between px-3 py-2 rounded-lg bg-muted/30 border border-border text-sm">
+                              <span className="text-muted-foreground capitalize">{key.replace(/([A-Z])/g, ' $1')}</span>
+                              <span className="font-medium">{String(val)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-center py-8 text-muted-foreground text-sm">Unable to load health data</div>
+                  )}
+                </CardContent>
+              </Card>
+            </TabsContent>
+
+            {/* ── Usage ── */}
+            <TabsContent value="usage" className="space-y-4 mt-4">
+              <Card className="p-0">
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm">Usage & Quotas</CardTitle>
+                  <CardDescription>Resource usage for this client</CardDescription>
+                </CardHeader>
+                <CardContent className="pt-0 space-y-4">
+                  {usage ? (
+                    <>
+                      <div className="space-y-3">
+                        <div>
+                          <div className="flex justify-between text-sm mb-1">
+                            <span className="text-muted-foreground">Seats</span>
+                            <span className="font-medium">{usage.seats.used} / {usage.seats.total}</span>
+                          </div>
+                          <Progress value={(usage.seats.used / usage.seats.total) * 100} />
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        {[
+                          { label: 'Contacts', value: usage.contacts },
+                          { label: 'Deals', value: usage.deals },
+                          { label: 'Campaigns', value: usage.campaigns },
+                          { label: 'Emails Sent', value: usage.emailsSent },
+                          { label: 'AI Tokens Used', value: usage.aiTokensUsed.toLocaleString() },
+                        ].map(item => (
+                          <div key={item.label} className="p-3 rounded-xl bg-muted/40 border border-border">
+                            <p className="text-xs text-muted-foreground">{item.label}</p>
+                            <p className="text-lg font-semibold text-foreground">{item.value}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-center py-8 text-muted-foreground text-sm">Loading usage data...</div>
+                  )}
+                </CardContent>
+              </Card>
+            </TabsContent>
+
+            {/* ── Team ── */}
+            <TabsContent value="team" className="space-y-4 mt-4">
+              <Card className="p-0">
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm">Team Members</CardTitle>
+                  <CardDescription>Manage users with access to this tenant</CardDescription>
+                </CardHeader>
+                <CardContent className="pt-0">
+                  {members.length > 0 ? (
+                    <div className="space-y-2">
+                      {members.map((m: any) => (
+                        <div key={m.id} className="flex items-center justify-between p-3 rounded-lg border border-border">
+                          <div className="flex items-center gap-3">
+                            <div className="h-8 w-8 rounded-full bg-primary/10 flex items-center justify-center text-primary text-xs font-semibold">
+                              {m.user.initials}
+                            </div>
+                            <div>
+                              <p className="text-sm font-medium">{m.user.name}</p>
+                              <p className="text-xs text-muted-foreground">{m.user.email}</p>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <Select value={m.role} onValueChange={async (role) => {
+                              await apiRequest(`/admin/tenants/${tenant.id}/members/${m.userId}`, { method: 'PATCH', body: JSON.stringify({ role }) });
+                              const updated = await apiRequest(`/admin/tenants/${tenant.id}/members`);
+                              setMembers(updated as any[]);
+                            }}>
+                              <SelectTrigger className="h-7 text-xs w-28">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {['owner', 'admin', 'sales', 'marketer', 'viewer'].map(r => (
+                                  <SelectItem key={r} value={r} className="text-xs capitalize">{r}</SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                            <button
+                              onClick={async () => {
+                                if (!window.confirm(`Remove ${m.user.name} from this tenant?`)) return;
+                                await apiRequest(`/admin/tenants/${tenant.id}/members/${m.userId}`, { method: 'DELETE' });
+                                setMembers(prev => prev.filter(x => x.id !== m.id));
+                              }}
+                              className="p-1.5 rounded-md hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-center py-8 text-muted-foreground text-sm">
+                      <Users className="h-8 w-8 mx-auto mb-2 opacity-30" />
+                      No team members
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            </TabsContent>
+
+            {/* ── Billing ── */}
+            <TabsContent value="billing" className="space-y-4 mt-4">
+              <Card className="p-0">
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm">Billing & Subscription</CardTitle>
+                  <CardDescription>Subscription status and payment history</CardDescription>
+                </CardHeader>
+                <CardContent className="pt-0 space-y-4">
+                  {billing ? (
+                    <>
+                      {billing.subscription ? (
+                        <div className="p-4 rounded-xl border border-border space-y-2">
+                          <div className="flex items-center justify-between">
+                            <p className="text-sm font-medium">Subscription Status</p>
+                            <Badge variant={billing.subscription.status === 'active' ? 'default' : 'destructive'}>
+                              {billing.subscription.status}
+                            </Badge>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2 text-sm">
+                            <div><span className="text-muted-foreground">Plan:</span> {billing.subscription.plan}</div>
+                            <div><span className="text-muted-foreground">Seats:</span> {billing.subscription.seats}</div>
+                            {billing.subscription.currentPeriodEnd && (
+                              <div className="col-span-2">
+                                <span className="text-muted-foreground">Current Period Ends:</span>{' '}
+                                {new Date(billing.subscription.currentPeriodEnd).toLocaleDateString()}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="p-4 rounded-xl bg-muted/40 border border-border text-center text-sm text-muted-foreground">
+                          No active subscription
+                        </div>
+                      )}
+                      {billing.invoices.length > 0 && (
+                        <div>
+                          <p className="text-xs font-medium text-muted-foreground mb-2">Recent Invoices</p>
+                          <div className="space-y-1.5">
+                            {billing.invoices.slice(0, 5).map((inv: any) => (
+                              <div key={inv.id} className="flex items-center justify-between px-3 py-2 rounded-lg border border-border text-sm">
+                                <span>{inv.number || inv.id.slice(0, 8)}</span>
+                                <div className="flex items-center gap-3">
+                                  <span className="font-medium">${Number(inv.amountDue).toFixed(2)}</span>
+                                  <Badge variant={inv.status === 'paid' ? 'default' : 'secondary'}>{inv.status}</Badge>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {billing.paymentMethods.length > 0 && (
+                        <div>
+                          <p className="text-xs font-medium text-muted-foreground mb-2">Payment Methods</p>
+                          <div className="space-y-1.5">
+                            {billing.paymentMethods.map((pm: any) => (
+                              <div key={pm.id} className="flex items-center justify-between px-3 py-2 rounded-lg border border-border text-sm">
+                                <span className="capitalize">{pm.brand ?? 'Card'} ****{pm.last4}</span>
+                                <span className="text-muted-foreground">{pm.expMonth}/{pm.expYear}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="text-center py-8 text-muted-foreground text-sm">Loading billing data...</div>
+                  )}
+                </CardContent>
+              </Card>
+            </TabsContent>
+
+            {/* ── Quotas ── */}
+            <TabsContent value="quotas" className="space-y-4 mt-4">
+              <Card className="p-0">
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm">Resource Quotas</CardTitle>
+                  <CardDescription>Configure resource limits for this client</CardDescription>
+                </CardHeader>
+                <CardContent className="pt-0 space-y-3">
+                  {['contacts', 'emails_per_month', 'ai_tokens', 'campaigns', 'seats', 'domains'].map(resource => {
+                    const quota = quotas.find((q: any) => q.resource === resource);
+                    return (
+                      <div key={resource} className="flex items-center gap-3 p-3 rounded-lg border border-border">
+                        <div className="flex-1">
+                          <p className="text-sm font-medium capitalize">{resource.replace(/_/g, ' ')}</p>
+                          {quota && (
+                            <div className="mt-1">
+                              <Progress value={quota.limitValue > 0 ? (quota.currentUsage / quota.limitValue) * 100 : 0} />
+                              <p className="text-xs text-muted-foreground mt-0.5">{quota.currentUsage} / {quota.limitValue} used</p>
+                            </div>
+                          )}
+                        </div>
+                        <Input
+                          type="number"
+                          className="w-24 h-8 text-sm"
+                          placeholder="Limit"
+                          defaultValue={quota?.limitValue ?? ''}
+                          onBlur={async (e) => {
+                            const val = Number(e.target.value);
+                            if (!val) return;
+                            try {
+                              await apiRequest(`/admin/tenants/${tenant.id}/quotas`, {
+                                method: 'PUT',
+                                body: JSON.stringify([{ resource, limitValue: val }]),
+                              });
+                              const updated = await apiRequest(`/admin/tenants/${tenant.id}/quotas`);
+                              setQuotas(updated as any[]);
+                            } catch {}
+                          }}
+                        />
+                      </div>
+                    );
+                  })}
+                </CardContent>
+              </Card>
+            </TabsContent>
+
+            {/* ── Contracts ── */}
+            <TabsContent value="contracts" className="space-y-4 mt-4">
+              <Card className="p-0">
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm">Contracts</CardTitle>
+                  <CardDescription>Agreements and contracts for this client</CardDescription>
+                </CardHeader>
+                <CardContent className="pt-0">
+                  {tenantContracts.length > 0 ? (
+                    <div className="space-y-2">
+                      {tenantContracts.map((c: any) => (
+                        <div key={c.id} className="flex items-center justify-between p-3 rounded-lg border border-border">
+                          <div>
+                            <p className="text-sm font-medium">{c.title}</p>
+                            <p className="text-xs text-muted-foreground">
+                              {c.contractType} · ${Number(c.value).toFixed(2)}
+                              {c.endDate && ` · Ends ${new Date(c.endDate).toLocaleDateString()}`}
+                            </p>
+                          </div>
+                          <Badge variant={c.status === 'active' ? 'default' : c.status === 'expired' ? 'secondary' : 'outline'}>
+                            {c.status}
+                          </Badge>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-center py-8 text-muted-foreground text-sm">No contracts</div>
+                  )}
+                </CardContent>
+              </Card>
+            </TabsContent>
+
+            {/* ── Feature Flags ── */}
+            <TabsContent value="flags" className="space-y-4 mt-4">
+              <Card className="p-0">
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm">Feature Flags</CardTitle>
+                  <CardDescription>Toggle features for this client</CardDescription>
+                </CardHeader>
+                <CardContent className="pt-0">
+                  {tenantFlags.length > 0 ? (
+                    <div className="space-y-2">
+                      {tenantFlags.map((f: any) => (
+                        <div key={f.id} className="flex items-center justify-between p-3 rounded-lg border border-border">
+                          <div>
+                            <p className="text-sm font-medium">{f.name}</p>
+                            <p className="text-xs text-muted-foreground">{f.key}{f.isGlobal ? ' · Global' : ''}</p>
+                          </div>
+                          <Switch
+                            checked={f.enabled}
+                            onCheckedChange={async (enabled) => {
+                              try {
+                                await apiRequest(`/admin/feature-flags/tenant/${tenant.id}/${f.id}`, {
+                                  method: 'PUT',
+                                  body: JSON.stringify({ enabled }),
+                                });
+                                const updated = await apiRequest(`/admin/feature-flags/tenant/${tenant.id}`);
+                                setTenantFlags(updated as any[]);
+                              } catch {}
+                            }}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-center py-8 text-muted-foreground text-sm">No feature flags configured</div>
+                  )}
+                </CardContent>
+              </Card>
             </TabsContent>
           </Tabs>
         </div>
       </div>
+
+      {/* Notify Modal */}
+      {showNotify && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowNotify(false)} />
+          <div className="relative bg-background rounded-2xl shadow-2xl w-full max-w-md border border-border">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-border">
+              <div>
+                <h2 className="text-base font-semibold text-foreground">Send Notification</h2>
+                <p className="text-xs text-muted-foreground mt-0.5">Notify all users of {tenant.companyName}</p>
+              </div>
+              <button onClick={() => setShowNotify(false)} className="p-1.5 rounded-md hover:bg-muted text-muted-foreground">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="px-6 py-5 space-y-4">
+              <div className="space-y-1.5">
+                <Label>Title</Label>
+                <Input placeholder="Notification title" value={notifyForm.title} onChange={e => setNotifyForm(f => ({ ...f, title: e.target.value }))} />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Message</Label>
+                <textarea
+                  value={notifyForm.body}
+                  onChange={e => setNotifyForm(f => ({ ...f, body: e.target.value }))}
+                  placeholder="Notification message..."
+                  className="w-full px-3 py-2 text-sm bg-muted/50 border border-border rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-primary/30 min-h-[80px]"
+                />
+              </div>
+              <div className="flex justify-end gap-3 pt-2 border-t border-border">
+                <Button variant="outline" size="sm" onClick={() => setShowNotify(false)}>Cancel</Button>
+                <Button size="sm" disabled={notifyBusy || !notifyForm.title.trim()} onClick={async () => {
+                  setNotifyBusy(true);
+                  try {
+                    await apiRequest(`/admin/tenants/${tenant.id}/notify`, {
+                      method: 'POST',
+                      body: JSON.stringify({ title: notifyForm.title, body: notifyForm.body }),
+                    });
+                    setShowNotify(false);
+                    setNotifyForm({ title: '', body: '' });
+                  } catch {} finally { setNotifyBusy(false); }
+                }}>
+                  <Send className="h-3.5 w-3.5 mr-1.5" />{notifyBusy ? 'Sending...' : 'Send'}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -50,6 +50,21 @@ import { ProposalTemplates } from "./pages/settings/ProposalTemplates";
 import { Tenants } from "./pages/mcc/Tenants";
 import { TenantDetail } from "./pages/mcc/TenantDetail";
 import { Pricing } from "./pages/mcc/Pricing";
+import { RevenueAnalytics } from "./pages/mcc/RevenueAnalytics";
+import { AuditLog } from "./pages/mcc/AuditLog";
+import { BillingOverview } from "./pages/mcc/BillingOverview";
+import { ColdEmailHealth } from "./pages/mcc/ColdEmailHealth";
+import { ActivityFeed } from "./pages/mcc/ActivityFeed";
+import { AiCostMonitor } from "./pages/mcc/AiCostMonitor";
+import { DomainOrders } from "./pages/mcc/DomainOrders";
+import { CallAnalytics } from "./pages/mcc/CallAnalytics";
+import { OnboardingTemplates } from "./pages/mcc/OnboardingTemplates";
+import { MccSettings } from "./pages/mcc/MccSettings";
+import { Contracts } from "./pages/mcc/Contracts";
+import { FeatureFlags } from "./pages/mcc/FeatureFlags";
+import { AlertRules } from "./pages/mcc/AlertRules";
+import { TenantBenchmark } from "./pages/mcc/TenantBenchmark";
+import { NpsAnalytics } from "./pages/mcc/NpsAnalytics";
 
 function ProtectedLayout() {
   return (
@@ -123,6 +138,10 @@ export const router = createBrowserRouter([
         element: <AdminRoute><Pricing /></AdminRoute>,
       },
       {
+        path: "mcc/revenue",
+        element: <AdminRoute><RevenueAnalytics /></AdminRoute>,
+      },
+      {
         path: "mcc/proposals",
         element: <AdminRoute><ProposalList admin /></AdminRoute>,
       },
@@ -143,8 +162,64 @@ export const router = createBrowserRouter([
         element: <AdminRoute><ProposalCreate admin /></AdminRoute>,
       },
       {
+        path: "mcc/audit-log",
+        element: <AdminRoute><AuditLog /></AdminRoute>,
+      },
+      {
         path: "mcc/finance",
         element: <AdminRoute><Finance admin /></AdminRoute>,
+      },
+      {
+        path: "mcc/billing",
+        element: <AdminRoute><BillingOverview /></AdminRoute>,
+      },
+      {
+        path: "mcc/cold-email-health",
+        element: <AdminRoute><ColdEmailHealth /></AdminRoute>,
+      },
+      {
+        path: "mcc/activity-feed",
+        element: <AdminRoute><ActivityFeed /></AdminRoute>,
+      },
+      {
+        path: "mcc/ai-usage",
+        element: <AdminRoute><AiCostMonitor /></AdminRoute>,
+      },
+      {
+        path: "mcc/domain-orders",
+        element: <AdminRoute><DomainOrders /></AdminRoute>,
+      },
+      {
+        path: "mcc/call-analytics",
+        element: <AdminRoute><CallAnalytics /></AdminRoute>,
+      },
+      {
+        path: "mcc/onboarding-templates",
+        element: <AdminRoute><OnboardingTemplates /></AdminRoute>,
+      },
+      {
+        path: "mcc/settings",
+        element: <AdminRoute><MccSettings /></AdminRoute>,
+      },
+      {
+        path: "mcc/contracts",
+        element: <AdminRoute><Contracts /></AdminRoute>,
+      },
+      {
+        path: "mcc/feature-flags",
+        element: <AdminRoute><FeatureFlags /></AdminRoute>,
+      },
+      {
+        path: "mcc/alerts",
+        element: <AdminRoute><AlertRules /></AdminRoute>,
+      },
+      {
+        path: "mcc/benchmarks",
+        element: <AdminRoute><TenantBenchmark /></AdminRoute>,
+      },
+      {
+        path: "mcc/nps",
+        element: <AdminRoute><NpsAnalytics /></AdminRoute>,
       },
     ],
   },

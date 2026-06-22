@@ -290,6 +290,11 @@ model Tenant {
   financeTaxConfigs    FinanceTaxConfig[]
   financeSettings      FinanceSetting?
   financeSequences     FinanceSequence[]
+  quotas               TenantQuota[]
+  contracts            TenantContract[]
+  npsSurveys           NpsSurvey[]
+  tenantFeatureFlags   TenantFeatureFlag[]
+  alertEvents          AlertEvent[]
 }
 
 model TenantUser {
@@ -1952,4 +1957,139 @@ model OnboardingItem {
 
   @@unique([tenantId, key])
   @@index([tenantId, completedAt])
+}
+
+// ════════════════════════════════════════════════════════════════════
+// MCC ADMIN — Quotas, Alerts, Contracts, NPS, Feature Flags, Settings
+// ════════════════════════════════════════════════════════════════════
+
+model TenantQuota {
+  id           String   @id @default(uuid())
+  tenantId     String
+  resource     String
+  limitValue   Int
+  currentUsage Int      @default(0)
+  warnAt       Int?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, resource])
+  @@index([tenantId])
+}
+
+model OnboardingTemplate {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  items       Json     @default("[]")
+  isDefault   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model MccSetting {
+  id                       String   @id @default(uuid())
+  companyName              String   @default("NexusHQ")
+  logoUrl                  String?
+  primaryColor             String   @default("#1a56db")
+  supportEmail             String?
+  timezone                 String   @default("UTC")
+  defaultCurrency          String   @default("USD")
+  notificationSenderName   String?
+  notificationSenderEmail  String?
+  whitelabelEnabled        Boolean  @default(false)
+  whitelabelDomain         String?
+  updatedAt                DateTime @updatedAt
+}
+
+model AlertRule {
+  id          String       @id @default(uuid())
+  name        String
+  description String?
+  metric      String
+  operator    String
+  threshold   Float
+  severity    String       @default("warning")
+  isActive    Boolean      @default(true)
+  notifyAdmin Boolean      @default(true)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  events      AlertEvent[]
+}
+
+model AlertEvent {
+  id         String    @id @default(uuid())
+  ruleId     String
+  tenantId   String
+  severity   String
+  message    String
+  metadata   Json?
+  resolvedAt DateTime?
+  createdAt  DateTime  @default(now())
+  rule       AlertRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  tenant     Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, createdAt])
+  @@index([ruleId])
+}
+
+model TenantContract {
+  id            String   @id @default(uuid())
+  tenantId      String
+  title         String
+  contractType  String   @default("subscription")
+  status        String   @default("draft")
+  startDate     DateTime
+  endDate       DateTime?
+  renewalDate   DateTime?
+  autoRenew     Boolean  @default(false)
+  value         Decimal  @default(0) @db.Decimal(12, 2)
+  terms         String?
+  documentUrl   String?
+  notes         String?
+  createdBy     String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, status])
+}
+
+model NpsSurvey {
+  id        String   @id @default(uuid())
+  tenantId  String
+  userId    String?
+  score     Int
+  feedback  String?
+  category  String?
+  createdAt DateTime @default(now())
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, createdAt])
+}
+
+model FeatureFlag {
+  id          String              @id @default(uuid())
+  key         String              @unique
+  name        String
+  description String?
+  isGlobal    Boolean             @default(false)
+  defaultOn   Boolean             @default(false)
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+  tenantFlags TenantFeatureFlag[]
+}
+
+model TenantFeatureFlag {
+  id        String      @id @default(uuid())
+  tenantId  String
+  flagId    String
+  enabled   Boolean     @default(false)
+  createdAt DateTime    @default(now())
+  tenant    Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  flag      FeatureFlag @relation(fields: [flagId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, flagId])
+  @@index([tenantId])
 }

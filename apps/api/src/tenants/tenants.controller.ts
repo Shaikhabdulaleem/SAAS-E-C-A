@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { UserRole } from '@prisma/client';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
@@ -14,8 +14,16 @@ export class TenantsController {
   constructor(private readonly tenants: TenantsService) {}
 
   @Get()
-  list() {
-    return this.tenants.list();
+  list(@Query() query: Record<string, string>) {
+    return this.tenants.list(query);
+  }
+
+  @Post('bulk-action')
+  bulkAction(
+    @Body() body: { ids: string[]; action: string; params?: Record<string, unknown> },
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.tenants.bulkAction(body.ids, body.action, body.params ?? {}, user.id);
   }
 
   @Post()

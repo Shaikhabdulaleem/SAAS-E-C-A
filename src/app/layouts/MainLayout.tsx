@@ -31,6 +31,11 @@ import {
   Palette,
   Ban,
   ShoppingCart,
+  ScrollText,
+  CreditCard,
+  Activity,
+  Zap,
+  ToggleLeft,
 } from 'lucide-react';
 import { useState, type ComponentType } from 'react';
 import { Badge } from '../components/ui/badge';
@@ -145,9 +150,24 @@ function buildNavGroups(user: User | null, activeServices: string[] = [], isImpe
       items: [
         { name: 'Client Management', href: '/mcc/tenants', icon: ShieldCheck, badge: 'MCC' },
         { name: 'Plans & Pricing', href: '/mcc/pricing', icon: DollarSign },
+        { name: 'Revenue Analytics', href: '/mcc/revenue', icon: TrendingUp },
         { name: 'SaaS Proposals', href: '/mcc/proposals', icon: FileText },
         { name: 'Proposal Analytics', href: '/mcc/proposals/analytics', icon: TrendingUp },
         { name: 'SaaS Finance', href: '/mcc/finance', icon: Receipt },
+        { name: 'Billing Overview', href: '/mcc/billing', icon: CreditCard },
+        { name: 'Audit Log', href: '/mcc/audit-log', icon: ScrollText },
+        { name: 'Cold Email Health', href: '/mcc/cold-email-health', icon: HeartPulse },
+        { name: 'Activity Feed', href: '/mcc/activity-feed', icon: Activity },
+        { name: 'AI Usage', href: '/mcc/ai-usage', icon: Zap },
+        { name: 'Domain Orders', href: '/mcc/domain-orders', icon: Globe },
+        { name: 'Call Analytics', href: '/mcc/call-analytics', icon: Phone },
+        { name: 'Contracts', href: '/mcc/contracts', icon: FileText },
+        { name: 'NPS Analytics', href: '/mcc/nps', icon: TrendingUp },
+        { name: 'Alert Rules', href: '/mcc/alerts', icon: Bell },
+        { name: 'Benchmarks', href: '/mcc/benchmarks', icon: TrendingUp },
+        { name: 'Feature Flags', href: '/mcc/feature-flags', icon: ToggleLeft },
+        { name: 'Onboarding', href: '/mcc/onboarding-templates', icon: Users },
+        { name: 'MCC Settings', href: '/mcc/settings', icon: Settings },
       ],
     });
   }
@@ -339,10 +359,25 @@ export function MainLayout() {
     if (path.startsWith('/cold-email/domains')) return 'Sending Domains';
     if (path.startsWith('/ai-assistant')) return 'AI Call Assistant';
     if (path.startsWith('/settings')) return 'Settings';
+    if (path.startsWith('/mcc/revenue')) return 'Revenue Analytics';
     if (path.startsWith('/mcc/proposals')) return 'SaaS Proposals';
+    if (path.startsWith('/mcc/billing')) return 'Billing Overview';
     if (path.startsWith('/mcc/finance')) return 'SaaS Finance';
     if (path.startsWith('/mcc/pricing')) return 'Plans & Pricing';
     if (path.startsWith('/mcc/tenants')) return 'Client Management';
+    if (path.startsWith('/mcc/audit-log')) return 'Audit Log';
+    if (path.startsWith('/mcc/cold-email-health')) return 'Cold Email Health';
+    if (path.startsWith('/mcc/activity-feed')) return 'Activity Feed';
+    if (path.startsWith('/mcc/ai-usage')) return 'AI Usage';
+    if (path.startsWith('/mcc/domain-orders')) return 'Domain Orders';
+    if (path.startsWith('/mcc/call-analytics')) return 'Call Analytics';
+    if (path.startsWith('/mcc/onboarding-templates')) return 'Onboarding Templates';
+    if (path.startsWith('/mcc/settings')) return 'MCC Settings';
+    if (path.startsWith('/mcc/contracts')) return 'Contracts';
+    if (path.startsWith('/mcc/feature-flags')) return 'Feature Flags';
+    if (path.startsWith('/mcc/alerts')) return 'Alert Rules';
+    if (path.startsWith('/mcc/benchmarks')) return 'Benchmarks';
+    if (path.startsWith('/mcc/nps')) return 'NPS Analytics';
     return 'NexusHQ';
   };
 

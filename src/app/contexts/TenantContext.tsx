@@ -112,7 +112,7 @@ export const PLANS: Plan[] = [
   },
 ];
 
-export type TenantStatus = 'active' | 'trial' | 'suspended' | 'cancelled';
+export type TenantStatus = 'active' | 'trial' | 'onboarding' | 'payment_failed' | 'suspended' | 'cancelled';
 
 export interface Tenant {
   id: string;
