@@ -62,7 +62,13 @@ export function DomainOrders() {
     setLoading(true);
     setError(null);
     apiRequest<DomainOrdersResponse>('/admin/domain-purchases')
-      .then((res) => setData(res))
+      .then((res) => setData({
+        orders: res?.orders ?? [],
+        pipeline: res?.pipeline ?? {},
+        pagination: res?.pagination ?? { page: 1, pageSize: 25, total: 0 },
+        perTenant: res?.perTenant ?? [],
+        failedOrders: res?.failedOrders ?? [],
+      }))
       .catch((err) => {
         setData(null);
         setError(err instanceof Error ? err.message : 'Failed to load domain orders');

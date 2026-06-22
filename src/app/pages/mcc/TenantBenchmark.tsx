@@ -70,7 +70,10 @@ export function TenantBenchmark() {
     setLoading(true);
     setError(null);
     apiRequest<BenchmarkData>('/admin/benchmarks')
-      .then((res) => setData(res))
+      .then((res) => setData({
+        planAverages: res?.planAverages ?? [],
+        tenantRankings: res?.tenantRankings ?? [],
+      }))
       .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load benchmarks'))
       .finally(() => setLoading(false));
   };
@@ -217,7 +220,7 @@ export function TenantBenchmark() {
                   <SelectValue placeholder="Select a tenant to add" />
                 </SelectTrigger>
                 <SelectContent>
-                  {data?.tenantRankings
+                  {(data?.tenantRankings ?? [])
                     .filter((t) => !selectedIds.includes(t.tenantId))
                     .map((t) => (
                       <SelectItem key={t.tenantId} value={t.tenantId}>{t.companyName}</SelectItem>

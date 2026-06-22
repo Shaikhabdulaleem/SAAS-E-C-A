@@ -39,7 +39,12 @@ export function AiCostMonitor() {
     setLoading(true);
     setError(null);
     apiRequest<AiUsageSummary>('/admin/ai/usage-summary')
-      .then((res) => setData(res))
+      .then((res) => setData({
+        totals: res?.totals ?? { aiTokens: 0, aiEvents: 0, callInsightCost: 0, callInsightTokens: 0, callInsightCount: 0 },
+        perTenant: res?.perTenant ?? [],
+        perModel: res?.perModel ?? [],
+        dailyTrend: res?.dailyTrend ?? [],
+      }))
       .catch((err) => {
         setData(null);
         setError(err instanceof Error ? err.message : 'Failed to load AI usage data');

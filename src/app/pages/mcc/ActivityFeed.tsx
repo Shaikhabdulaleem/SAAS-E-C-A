@@ -83,7 +83,11 @@ export function ActivityFeed() {
     if (typeFilter !== 'all') params.set('type', typeFilter);
 
     apiRequest<ActivityFeedResponse>(`/admin/activity-feed?${params.toString()}`)
-      .then((res) => setData(res))
+      .then((res) => setData({
+        items: res?.items ?? [],
+        loginEvents: res?.loginEvents ?? [],
+        pagination: res?.pagination ?? { page: 1, pageSize: 25, total: 0 },
+      }))
       .catch((err) => {
         setData(null);
         setError(err instanceof Error ? err.message : 'Failed to load activity feed');

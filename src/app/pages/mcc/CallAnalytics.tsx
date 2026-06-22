@@ -52,7 +52,11 @@ export function CallAnalytics() {
     setLoading(true);
     setError(null);
     apiRequest<CallSummary>('/admin/calls/summary')
-      .then((res) => setData(res))
+      .then((res) => setData({
+        totals: res?.totals ?? { totalSessions: 0, totalInsights: 0, avgCoachingScore: 0, totalRecordings: 0, totalRecordingHours: 0 },
+        sentimentDistribution: res?.sentimentDistribution ?? {},
+        perTenant: res?.perTenant ?? [],
+      }))
       .catch((err) => {
         setData(null);
         setError(err instanceof Error ? err.message : 'Failed to load call analytics');
