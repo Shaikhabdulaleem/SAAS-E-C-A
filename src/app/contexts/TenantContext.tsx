@@ -196,7 +196,8 @@ export function TenantProvider({ children }: { children: ReactNode }) {
     }
 
     try {
-      const data = await apiRequest<Tenant[]>('/admin/tenants');
+      const raw = await apiRequest<Tenant[] | { items: Tenant[] }>('/admin/tenants?pageSize=1000');
+      const data = Array.isArray(raw) ? raw : (raw.items ?? []);
       const normalized = data.map(normalizeTenant);
       setTenants(normalized);
       void refreshPricing().catch(() => {
