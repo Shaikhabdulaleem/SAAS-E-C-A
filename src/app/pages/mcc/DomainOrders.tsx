@@ -80,13 +80,14 @@ export function DomainOrders() {
     fetchData();
   }, []);
 
-  const filteredOrders = data?.orders.filter((order) => {
+  const filteredOrders = (data?.orders ?? []).filter((order) => {
+    const name = (order.tenant?.companyName ?? order.baseName).toLowerCase();
     const matchesSearch = !searchFilter.trim() ||
-      order.tenant?.companyName ?? order.baseName.toLowerCase().includes(searchFilter.toLowerCase()) ||
+      name.includes(searchFilter.toLowerCase()) ||
       order.id.toLowerCase().includes(searchFilter.toLowerCase());
     const matchesStatus = statusFilter === 'all' || order.status === statusFilter;
     return matchesSearch && matchesStatus;
-  }) ?? [];
+  });
 
   const statusEntries = data ? Object.entries(data.pipeline) : [];
 

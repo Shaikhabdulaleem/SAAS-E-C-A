@@ -57,9 +57,9 @@ export function BillingOverview() {
     void fetchData();
   }, []);
 
-  const filteredSubscriptions = data?.subscriptions.filter(
+  const filteredSubscriptions = (data?.subscriptions ?? []).filter(
     s => statusFilter === 'all' || s.subscriptionStatus === statusFilter
-  ) ?? [];
+  );
 
   return (
     <div className="max-w-7xl mx-auto space-y-5">
