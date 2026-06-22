@@ -11,19 +11,20 @@ import { Button } from '../../components/ui/button';
 import { Badge } from '../../components/ui/badge';
 
 interface CallSummary {
-  totalCalls: number;
-  avgDuration: number;
-  summarizationRate: number;
-  totalRecordingHours: number;
-  coachingScoreDistribution: Array<{ range: string; count: number }>;
-  sentimentBreakdown: Array<{ sentiment: string; count: number }>;
+  totals: {
+    totalSessions: number;
+    totalInsights: number;
+    avgCoachingScore: number;
+    totalRecordings: number;
+    totalRecordingHours: number;
+  };
+  sentimentDistribution: Record<string, number>;
   perTenant: Array<{
     tenantId: string;
     companyName: string;
-    sessions: number;
-    avgDuration: number;
-    avgCoachingScore: number;
-    sentiment: string;
+    sessionCount: number;
+    avgDurationSec: number;
+    avgCoachingScore: number | null;
   }>;
 }
 
@@ -63,31 +64,35 @@ export function CallAnalytics() {
     fetchData();
   }, []);
 
+  const sentimentData = data?.sentimentDistribution
+    ? Object.entries(data.sentimentDistribution).map(([sentiment, count]) => ({ sentiment, count }))
+    : [];
+
   const metrics = [
     {
-      name: 'Total Calls',
-      value: data ? data.totalCalls.toLocaleString() : '-',
+      name: 'Total Sessions',
+      value: data ? (data.totals.totalSessions).toLocaleString() : '-',
       icon: Phone,
       color: 'text-indigo-600',
       bg: 'bg-indigo-50',
     },
     {
-      name: 'Avg Duration',
-      value: data ? formatDuration(data.avgDuration) : '-',
+      name: 'Avg Coaching Score',
+      value: data ? String(data.totals.avgCoachingScore) : '-',
       icon: Clock,
       color: 'text-sky-600',
       bg: 'bg-sky-50',
     },
     {
-      name: 'Summarization Rate',
-      value: data ? `${data.summarizationRate.toFixed(1)}%` : '-',
+      name: 'Total Insights',
+      value: data ? data.totals.totalInsights.toLocaleString() : '-',
       icon: FileText,
       color: 'text-violet-600',
       bg: 'bg-violet-50',
     },
     {
       name: 'Recording Hours',
-      value: data ? data.totalRecordingHours.toFixed(1) : '-',
+      value: data ? data.totals.totalRecordingHours.toFixed(1) : '-',
       icon: Mic,
       color: 'text-emerald-600',
       bg: 'bg-emerald-50',
@@ -156,17 +161,17 @@ export function CallAnalytics() {
           <CardContent>
             {loading ? (
               <div className="h-[250px] bg-muted rounded animate-pulse" />
-            ) : data?.coachingScoreDistribution.length ? (
+            ) : data?.perTenant?.length ? (
               <div style={{ height: 250 }}>
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={data.coachingScoreDistribution}>
+                  <BarChart data={data.perTenant.filter(t => t.avgCoachingScore != null).slice(0, 10)}>
                     <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                    <XAxis dataKey="range" tick={{ fontSize: 11 }} stroke="hsl(var(--muted-foreground))" />
+                    <XAxis dataKey="companyName" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" angle={-20} textAnchor="end" height={50} />
                     <YAxis tick={{ fontSize: 11 }} stroke="hsl(var(--muted-foreground))" />
                     <Tooltip />
-                    <Bar dataKey="count" radius={[4, 4, 0, 0]}>
-                      {data.coachingScoreDistribution.map((_, index) => (
-                        <Cell key={`coaching-${index}`} fill={COACHING_COLORS[index % COACHING_COLORS.length]} />
+                    <Bar dataKey="avgCoachingScore" name="Coaching Score" radius={[4, 4, 0, 0]}>
+                      {data.perTenant.filter(t => t.avgCoachingScore != null).slice(0, 10).map((t, index) => (
+                        <Cell key={`coaching-${index}`} fill={(t.avgCoachingScore ?? 0) >= 70 ? '#10b981' : (t.avgCoachingScore ?? 0) >= 40 ? '#f59e0b' : '#ef4444'} />
                       ))}
                     </Bar>
                   </BarChart>
@@ -187,12 +192,12 @@ export function CallAnalytics() {
           <CardContent>
             {loading ? (
               <div className="h-[250px] bg-muted rounded animate-pulse" />
-            ) : data?.sentimentBreakdown.length ? (
+            ) : sentimentData.length ? (
               <div style={{ height: 250 }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <PieChart>
                     <Pie
-                      data={data.sentimentBreakdown}
+                      data={sentimentData}
                       dataKey="count"
                       nameKey="sentiment"
                       cx="50%"
@@ -200,7 +205,7 @@ export function CallAnalytics() {
                       outerRadius={80}
                       label={({ sentiment, count }) => `${sentiment}: ${count}`}
                     >
-                      {data.sentimentBreakdown.map((entry) => (
+                      {sentimentData.map((entry) => (
                         <Cell
                           key={entry.sentiment}
                           fill={SENTIMENT_COLORS[entry.sentiment] ?? '#9ca3af'}
@@ -234,8 +239,7 @@ export function CallAnalytics() {
                     <th className="pb-2 font-medium">Company</th>
                     <th className="pb-2 font-medium text-right">Sessions</th>
                     <th className="pb-2 font-medium text-right">Avg Duration</th>
-                    <th className="pb-2 font-medium text-right">Avg Coaching Score</th>
-                    <th className="pb-2 font-medium">Sentiment</th>
+                    <th className="pb-2 font-medium text-right">Coaching Score</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y">
@@ -249,26 +253,17 @@ export function CallAnalytics() {
                           {tenant.companyName}
                         </Link>
                       </td>
-                      <td className="py-2.5 text-right">{tenant.sessions}</td>
-                      <td className="py-2.5 text-right">{formatDuration(tenant.avgDuration)}</td>
+                      <td className="py-2.5 text-right">{tenant.sessionCount}</td>
+                      <td className="py-2.5 text-right">{formatDuration(tenant.avgDurationSec)}</td>
                       <td className="py-2.5 text-right">
-                        <Badge
-                          variant={tenant.avgCoachingScore >= 70 ? 'default' : tenant.avgCoachingScore >= 40 ? 'secondary' : 'destructive'}
-                          className="text-xs"
-                        >
-                          {tenant.avgCoachingScore.toFixed(1)}
-                        </Badge>
-                      </td>
-                      <td className="py-2.5">
-                        <Badge
-                          className="text-[10px]"
-                          style={{
-                            backgroundColor: `${SENTIMENT_COLORS[tenant.sentiment] ?? '#9ca3af'}20`,
-                            color: SENTIMENT_COLORS[tenant.sentiment] ?? '#9ca3af',
-                          }}
-                        >
-                          {tenant.sentiment}
-                        </Badge>
+                        {tenant.avgCoachingScore != null ? (
+                          <Badge
+                            variant={tenant.avgCoachingScore >= 70 ? 'default' : tenant.avgCoachingScore >= 40 ? 'secondary' : 'destructive'}
+                            className="text-xs"
+                          >
+                            {tenant.avgCoachingScore}
+                          </Badge>
+                        ) : <span className="text-muted-foreground">—</span>}
                       </td>
                     </tr>
                   ))}

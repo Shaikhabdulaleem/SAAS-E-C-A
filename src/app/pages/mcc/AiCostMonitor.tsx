@@ -11,19 +11,21 @@ import { Button } from '../../components/ui/button';
 import { Badge } from '../../components/ui/badge';
 
 interface AiUsageSummary {
-  totalTokens: number;
-  totalCost: number;
-  totalSessions: number;
-  avgCostPerTenant: number;
-  dailyUsage: Array<{ date: string; tokens: number; cost: number }>;
+  totals: {
+    aiTokens: number;
+    aiEvents: number;
+    callInsightCost: number;
+    callInsightTokens: number;
+    callInsightCount: number;
+  };
   perTenant: Array<{
     tenantId: string;
     companyName: string;
-    tokens: number;
-    cost: number;
-    sessions: number;
+    totalTokens: number;
+    eventCount: number;
   }>;
-  modelDistribution: Array<{ model: string; tokens: number; cost: number }>;
+  perModel: Array<{ model: string; totalTokens: number; eventCount: number }>;
+  dailyTrend: Array<{ date: string; tokens: number; count: number }>;
 }
 
 const MODEL_COLORS = ['#4F46E5', '#7C3AED', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444'];
@@ -49,31 +51,36 @@ export function AiCostMonitor() {
     fetchData();
   }, []);
 
+  const totalTokens = data?.totals.aiTokens ?? 0;
+  const totalCost = data?.totals.callInsightCost ?? 0;
+  const totalEvents = data?.totals.aiEvents ?? 0;
+  const tenantCount = data?.perTenant.length ?? 1;
+
   const metrics = [
     {
       name: 'Total Tokens',
-      value: data ? data.totalTokens.toLocaleString() : '-',
+      value: data ? totalTokens.toLocaleString() : '-',
       icon: Hash,
       color: 'text-indigo-600',
       bg: 'bg-indigo-50',
     },
     {
       name: 'Total Cost',
-      value: data ? `$${data.totalCost.toFixed(2)}` : '-',
+      value: data ? `$${totalCost.toFixed(2)}` : '-',
       icon: DollarSign,
       color: 'text-emerald-600',
       bg: 'bg-emerald-50',
     },
     {
-      name: 'Sessions',
-      value: data ? data.totalSessions.toLocaleString() : '-',
+      name: 'AI Events',
+      value: data ? totalEvents.toLocaleString() : '-',
       icon: Zap,
       color: 'text-violet-600',
       bg: 'bg-violet-50',
     },
     {
-      name: 'Avg Cost/Tenant',
-      value: data ? `$${data.avgCostPerTenant.toFixed(2)}` : '-',
+      name: 'Avg Tokens/Tenant',
+      value: data ? Math.round(totalTokens / tenantCount).toLocaleString() : '-',
       icon: Users,
       color: 'text-sky-600',
       bg: 'bg-sky-50',
@@ -142,10 +149,10 @@ export function AiCostMonitor() {
           <CardContent>
             {loading ? (
               <div className="h-[250px] bg-muted rounded animate-pulse" />
-            ) : data?.dailyUsage.length ? (
+            ) : data?.dailyTrend?.length ? (
               <div style={{ height: 250 }}>
                 <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={data.dailyUsage}>
+                  <LineChart data={data.dailyTrend}>
                     <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
                     <XAxis dataKey="date" tick={{ fontSize: 11 }} stroke="hsl(var(--muted-foreground))" />
                     <YAxis tick={{ fontSize: 11 }} stroke="hsl(var(--muted-foreground))" />
@@ -156,7 +163,6 @@ export function AiCostMonitor() {
                       ]}
                     />
                     <Line type="monotone" dataKey="tokens" stroke="#4F46E5" strokeWidth={2} dot={{ r: 3 }} />
-                    <Line type="monotone" dataKey="cost" stroke="#10b981" strokeWidth={2} dot={{ r: 3 }} />
                   </LineChart>
                 </ResponsiveContainer>
               </div>
@@ -175,20 +181,20 @@ export function AiCostMonitor() {
           <CardContent>
             {loading ? (
               <div className="h-[250px] bg-muted rounded animate-pulse" />
-            ) : data?.modelDistribution.length ? (
+            ) : data?.perModel?.length ? (
               <div style={{ height: 250 }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <PieChart>
                     <Pie
-                      data={data.modelDistribution}
-                      dataKey="tokens"
+                      data={data.perModel}
+                      dataKey="totalTokens"
                       nameKey="model"
                       cx="50%"
                       cy="50%"
                       outerRadius={80}
                       label={({ model, percent }) => `${model}: ${(percent * 100).toFixed(0)}%`}
                     >
-                      {data.modelDistribution.map((_, index) => (
+                      {data.perModel.map((_, index) => (
                         <Cell key={`model-${index}`} fill={MODEL_COLORS[index % MODEL_COLORS.length]} />
                       ))}
                     </Pie>
@@ -219,8 +225,8 @@ export function AiCostMonitor() {
                   <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
                   <XAxis dataKey="companyName" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" angle={-30} textAnchor="end" height={60} />
                   <YAxis tick={{ fontSize: 11 }} stroke="hsl(var(--muted-foreground))" />
-                  <Tooltip formatter={(value: number) => [`$${value.toFixed(2)}`, 'Cost']} />
-                  <Bar dataKey="cost" fill="#6366f1" radius={[4, 4, 0, 0]} />
+                  <Tooltip formatter={(value: number) => [value.toLocaleString(), 'Tokens']} />
+                  <Bar dataKey="totalTokens" fill="#6366f1" radius={[4, 4, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -245,8 +251,7 @@ export function AiCostMonitor() {
                   <tr className="border-b text-left text-muted-foreground">
                     <th className="pb-2 font-medium">Company</th>
                     <th className="pb-2 font-medium text-right">Tokens</th>
-                    <th className="pb-2 font-medium text-right">Cost</th>
-                    <th className="pb-2 font-medium text-right">Sessions</th>
+                    <th className="pb-2 font-medium text-right">Events</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y">
@@ -260,11 +265,8 @@ export function AiCostMonitor() {
                           {tenant.companyName}
                         </Link>
                       </td>
-                      <td className="py-2.5 text-right">{tenant.tokens.toLocaleString()}</td>
-                      <td className="py-2.5 text-right">
-                        <Badge variant="secondary" className="text-xs">${tenant.cost.toFixed(2)}</Badge>
-                      </td>
-                      <td className="py-2.5 text-right">{tenant.sessions}</td>
+                      <td className="py-2.5 text-right">{tenant.totalTokens.toLocaleString()}</td>
+                      <td className="py-2.5 text-right">{tenant.eventCount}</td>
                     </tr>
                   ))}
                 </tbody>

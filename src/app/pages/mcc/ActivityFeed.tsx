@@ -15,33 +15,32 @@ import {
   PaginationNext,
 } from '../../components/ui/pagination';
 
-interface ActivityEvent {
+interface AuditItem {
   id: string;
-  timestamp: string;
-  type: string;
-  actor: string;
-  tenantId: string;
-  tenantName: string;
-  details: string;
+  actorUserId: string | null;
+  tenantId: string | null;
+  event: string;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+  type?: string;
 }
 
 interface LoginEvent {
   id: string;
-  userId: string;
-  userName: string;
-  tenantId: string;
-  tenantName: string;
-  timestamp: string;
-  ip: string;
+  type: string;
+  actorUserId: string;
+  actorName: string;
+  tenantId: string | null;
+  tenantName: string | null;
+  event: string;
+  metadata: null;
+  createdAt: string;
 }
 
 interface ActivityFeedResponse {
-  events: ActivityEvent[];
+  items: AuditItem[];
   loginEvents: LoginEvent[];
-  total: number;
-  page: number;
-  pageSize: number;
-  totalPages: number;
+  pagination: { page: number; pageSize: number; total: number };
 }
 
 const EVENT_TYPE_COLORS: Record<string, string> = {
@@ -166,7 +165,7 @@ export function ActivityFeed() {
       <Card>
         <CardHeader className="pb-2">
           <CardTitle className="text-base">
-            Events {data ? `(${data.total} total)` : ''}
+            Events {data ? `(${data.pagination.total} total)` : ''}
           </CardTitle>
         </CardHeader>
         <CardContent>
@@ -182,9 +181,9 @@ export function ActivityFeed() {
                 </div>
               ))}
             </div>
-          ) : data?.events.length ? (
+          ) : data?.items?.length ? (
             <div className="space-y-1">
-              {data.events.map((event) => (
+              {data.items.map((event) => (
                 <div
                   key={event.id}
                   className="flex gap-4 p-3 rounded-lg hover:bg-muted/50 transition-colors"
@@ -196,18 +195,18 @@ export function ActivityFeed() {
                   <div className="flex-1 min-w-0 pb-4">
                     <div className="flex items-center gap-2 flex-wrap">
                       <Badge
-                        className={`text-[10px] ${EVENT_TYPE_COLORS[event.type] ?? EVENT_TYPE_COLORS.default}`}
+                        className={`text-[10px] ${EVENT_TYPE_COLORS[event.event] ?? EVENT_TYPE_COLORS.default}`}
                       >
-                        {event.type.replace(/_/g, ' ')}
+                        {event.event.replace(/\./g, ' ')}
                       </Badge>
                       <span className="text-xs text-muted-foreground">
-                        {new Date(event.timestamp).toLocaleString()}
+                        {new Date(event.createdAt).toLocaleString()}
                       </span>
                     </div>
-                    <p className="text-sm text-foreground mt-1">{event.details}</p>
+                    <p className="text-sm text-foreground mt-1">{event.metadata ? JSON.stringify(event.metadata) : event.event}</p>
                     <div className="flex items-center gap-3 mt-1.5 text-xs text-muted-foreground">
-                      <span>Actor: {event.actor}</span>
-                      <span>Tenant: {event.tenantName}</span>
+                      {event.actorUserId && <span>Actor: {event.actorUserId.slice(0, 8)}</span>}
+                      {event.tenantId && <span>Tenant: {event.tenantId.slice(0, 8)}</span>}
                     </div>
                   </div>
                 </div>
@@ -239,11 +238,11 @@ export function ActivityFeed() {
                 <tbody className="divide-y">
                   {data.loginEvents.map((login) => (
                     <tr key={login.id} className="hover:bg-muted/50">
-                      <td className="py-2.5 font-medium">{login.userName}</td>
-                      <td className="py-2.5 text-muted-foreground">{login.tenantName}</td>
-                      <td className="py-2.5 text-muted-foreground font-mono text-xs">{login.ip}</td>
+                      <td className="py-2.5 font-medium">{login.actorName}</td>
+                      <td className="py-2.5 text-muted-foreground">{login.tenantName ?? '—'}</td>
+                      <td className="py-2.5 text-muted-foreground font-mono text-xs">{login.actorUserId?.slice(0, 8)}</td>
                       <td className="py-2.5 text-right text-muted-foreground">
-                        {new Date(login.timestamp).toLocaleString()}
+                        {new Date(login.createdAt).toLocaleString()}
                       </td>
                     </tr>
                   ))}
@@ -255,7 +254,7 @@ export function ActivityFeed() {
       )}
 
       {/* Pagination */}
-      {data && data.totalPages > 1 && (
+      {data && Math.ceil((data.pagination?.total ?? 0) / (data.pagination?.pageSize ?? 25)) > 1 && (
         <div className="flex justify-center">
           <Pagination>
             <PaginationContent>
@@ -265,7 +264,7 @@ export function ActivityFeed() {
                   className={page <= 1 ? 'pointer-events-none opacity-50' : 'cursor-pointer'}
                 />
               </PaginationItem>
-              {Array.from({ length: Math.min(data.totalPages, 7) }, (_, i) => {
+              {Array.from({ length: Math.min(Math.ceil((data.pagination?.total ?? 0) / (data.pagination?.pageSize ?? 25)), 7) }, (_, i) => {
                 const pageNum = i + 1;
                 return (
                   <PaginationItem key={pageNum}>
@@ -281,8 +280,8 @@ export function ActivityFeed() {
               })}
               <PaginationItem>
                 <PaginationNext
-                  onClick={() => setPage((p) => Math.min(data.totalPages, p + 1))}
-                  className={page >= data.totalPages ? 'pointer-events-none opacity-50' : 'cursor-pointer'}
+                  onClick={() => setPage((p) => Math.min(Math.ceil((data.pagination?.total ?? 0) / (data.pagination?.pageSize ?? 25)), p + 1))}
+                  className={page >= Math.ceil((data.pagination?.total ?? 0) / (data.pagination?.pageSize ?? 25)) ? 'pointer-events-none opacity-50' : 'cursor-pointer'}
                 />
               </PaginationItem>
             </PaginationContent>
