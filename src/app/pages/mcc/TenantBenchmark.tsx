@@ -15,25 +15,34 @@ interface PlanBenchmark {
   avgSeats: number;
 }
 
-interface TenantMetrics {
+interface TenantRanking {
   tenantId: string;
   companyName: string;
   plan: string;
   mrr: number;
   services: number;
   seats: number;
-  healthScore: number;
-  loginRecency: number;
-  domainCount: number;
+  mrrPercentile: number;
+}
+
+interface TenantComparison {
+  tenantId: string;
+  companyName: string;
+  plan: string;
+  status: string;
+  mrr: number;
+  seats: number;
+  servicesEnabled: number;
+  integrations: number;
+  contacts: number;
+  deals: number;
+  campaigns: number;
+  members: number;
 }
 
 interface BenchmarkData {
   planAverages: PlanBenchmark[];
-  tenants: Array<{ id: string; companyName: string }>;
-}
-
-interface ComparisonResult {
-  tenants: TenantMetrics[];
+  tenantRankings: TenantRanking[];
 }
 
 const PLAN_COLORS: Record<string, { bg: string; text: string }> = {
@@ -54,7 +63,7 @@ export function TenantBenchmark() {
 
   // Comparison
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [comparison, setComparison] = useState<ComparisonResult | null>(null);
+  const [comparison, setComparison] = useState<TenantComparison[] | null>(null);
   const [comparing, setComparing] = useState(false);
 
   const fetchBenchmarks = () => {
@@ -76,7 +85,7 @@ export function TenantBenchmark() {
     setComparison(null);
     try {
       const ids = selectedIds.join(',');
-      const result = await apiRequest<ComparisonResult>(`/admin/benchmarks/compare?ids=${ids}`);
+      const result = await apiRequest<TenantComparison[]>(`/admin/benchmarks/compare?ids=${ids}`);
       setComparison(result);
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Comparison failed');
@@ -96,17 +105,10 @@ export function TenantBenchmark() {
     setComparison(null);
   };
 
-  const bestValue = (key: keyof TenantMetrics, higher = true) => {
-    if (!comparison) return '';
-    const vals = comparison.tenants.map((t) => Number(t[key]));
-    const best = higher ? Math.max(...vals) : Math.min(...vals);
-    return String(best);
-  };
-
-  const isHighlighted = (tenant: TenantMetrics, key: keyof TenantMetrics, higher = true) => {
-    if (!comparison || comparison.tenants.length < 2) return false;
+  const isHighlighted = (tenant: TenantComparison, key: keyof TenantComparison, higher = true) => {
+    if (!comparison || comparison.length < 2) return false;
     const val = Number(tenant[key]);
-    const vals = comparison.tenants.map((t) => Number(t[key]));
+    const vals = comparison.map((t) => Number(t[key]));
     const best = higher ? Math.max(...vals) : Math.min(...vals);
     return val === best && vals.filter((v) => v === best).length === 1;
   };
@@ -215,10 +217,10 @@ export function TenantBenchmark() {
                   <SelectValue placeholder="Select a tenant to add" />
                 </SelectTrigger>
                 <SelectContent>
-                  {data?.tenants
-                    .filter((t) => !selectedIds.includes(t.id))
+                  {data?.tenantRankings
+                    .filter((t) => !selectedIds.includes(t.tenantId))
                     .map((t) => (
-                      <SelectItem key={t.id} value={t.id}>{t.companyName}</SelectItem>
+                      <SelectItem key={t.tenantId} value={t.tenantId}>{t.companyName}</SelectItem>
                     ))}
                 </SelectContent>
               </Select>
@@ -237,7 +239,7 @@ export function TenantBenchmark() {
           {selectedIds.length > 0 && (
             <div className="flex flex-wrap gap-2 mb-4">
               {selectedIds.map((id) => {
-                const tenant = data?.tenants.find((t) => t.id === id);
+                const tenant = data?.tenantRankings.find((t) => t.tenantId === id);
                 return (
                   <Badge key={id} variant="secondary" className="text-sm py-1 px-3">
                     {tenant?.companyName ?? id}
@@ -254,9 +256,9 @@ export function TenantBenchmark() {
           )}
 
           {/* Comparison Results */}
-          {comparison && comparison.tenants.length > 0 && (
+          {comparison && comparison.length > 0 && (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mt-4">
-              {comparison.tenants.map((tenant) => (
+              {comparison.map((tenant) => (
                 <Card key={tenant.tenantId} className="border-2">
                   <CardHeader className="pb-3">
                     <CardTitle className="text-base">{tenant.companyName}</CardTitle>
@@ -267,10 +269,12 @@ export function TenantBenchmark() {
                   <CardContent className="space-y-3">
                     {([
                       { key: 'mrr' as const, label: 'MRR', format: (v: number) => `$${v.toLocaleString()}`, higher: true },
-                      { key: 'services' as const, label: 'Services', format: (v: number) => String(v), higher: true },
+                      { key: 'servicesEnabled' as const, label: 'Services', format: (v: number) => String(v), higher: true },
                       { key: 'seats' as const, label: 'Seats', format: (v: number) => String(v), higher: true },
-                      { key: 'healthScore' as const, label: 'Health Score', format: (v: number) => `${v}%`, higher: true },
-                      { key: 'domainCount' as const, label: 'Domains', format: (v: number) => String(v), higher: true },
+                      { key: 'contacts' as const, label: 'Contacts', format: (v: number) => String(v), higher: true },
+                      { key: 'deals' as const, label: 'Deals', format: (v: number) => String(v), higher: true },
+                      { key: 'campaigns' as const, label: 'Campaigns', format: (v: number) => String(v), higher: true },
+                      { key: 'members' as const, label: 'Members', format: (v: number) => String(v), higher: true },
                     ]).map((metric) => {
                       const highlighted = isHighlighted(tenant, metric.key, metric.higher);
                       return (

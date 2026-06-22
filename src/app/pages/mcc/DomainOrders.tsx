@@ -11,18 +11,22 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 interface DomainOrder {
   id: string;
   tenantId: string;
-  companyName: string;
+  baseName: string;
+  quantity: number;
   status: string;
-  domainCount: number;
   totalCost: number;
-  errorMessage?: string;
+  lastError: string | null;
   createdAt: string;
   updatedAt: string;
+  tenant: { id: string; companyName: string };
 }
 
 interface DomainOrdersResponse {
   orders: DomainOrder[];
-  statusCounts: Record<string, number>;
+  pipeline: Record<string, number>;
+  pagination: { page: number; pageSize: number; total: number };
+  perTenant: Array<{ tenantId: string; companyName: string; orderCount: number; totalCost: number; successRate: number }>;
+  failedOrders: Array<{ id: string; tenantId: string; companyName: string; baseName: string; lastError: string; createdAt: string }>;
 }
 
 const STATUS_CONFIG: Record<string, { color: string; icon: typeof CheckCircle2 }> = {
@@ -72,13 +76,13 @@ export function DomainOrders() {
 
   const filteredOrders = data?.orders.filter((order) => {
     const matchesSearch = !searchFilter.trim() ||
-      order.companyName.toLowerCase().includes(searchFilter.toLowerCase()) ||
+      order.tenant?.companyName ?? order.baseName.toLowerCase().includes(searchFilter.toLowerCase()) ||
       order.id.toLowerCase().includes(searchFilter.toLowerCase());
     const matchesStatus = statusFilter === 'all' || order.status === statusFilter;
     return matchesSearch && matchesStatus;
   }) ?? [];
 
-  const statusEntries = data ? Object.entries(data.statusCounts) : [];
+  const statusEntries = data ? Object.entries(data.pipeline) : [];
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
@@ -210,7 +214,7 @@ export function DomainOrders() {
                             to={`/mcc/tenants/${order.tenantId}`}
                             className="font-medium text-foreground hover:text-primary hover:underline"
                           >
-                            {order.companyName}
+                            {order.tenant?.companyName ?? order.baseName}
                           </Link>
                         </td>
                         <td className="py-2.5">
@@ -218,15 +222,15 @@ export function DomainOrders() {
                             {order.status.replace(/_/g, ' ')}
                           </Badge>
                         </td>
-                        <td className="py-2.5 text-right">{order.domainCount}</td>
+                        <td className="py-2.5 text-right">{order.quantity}</td>
                         <td className="py-2.5 text-right">${order.totalCost.toFixed(2)}</td>
                         <td className="py-2.5 text-right text-muted-foreground">
                           {new Date(order.createdAt).toLocaleDateString()}
                         </td>
                         <td className="py-2.5">
-                          {order.errorMessage ? (
+                          {order.lastError ? (
                             <span className="text-xs text-red-600 max-w-[200px] truncate block">
-                              {order.errorMessage}
+                              {order.lastError}
                             </span>
                           ) : (
                             <span className="text-xs text-muted-foreground">-</span>

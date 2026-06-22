@@ -29,7 +29,7 @@ interface TenantFlag {
   key: string;
   name: string;
   enabled: boolean;
-  isOverridden: boolean;
+  hasOverride: boolean;
 }
 
 interface Tenant {
@@ -138,7 +138,7 @@ export function FeatureFlags() {
         body: JSON.stringify({ enabled }),
       });
       setTenantFlags((prev) =>
-        prev.map((f) => (f.flagId === flagId ? { ...f, enabled, isOverridden: true } : f)),
+        prev.map((f) => (f.flagId === flagId ? { ...f, enabled, hasOverride: true } : f)),
       );
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to toggle flag');
@@ -332,7 +332,7 @@ export function FeatureFlags() {
                           />
                         </td>
                         <td className="py-3 px-4 text-center">
-                          {tf.isOverridden ? (
+                          {tf.hasOverride ? (
                             <Badge className="bg-amber-100 text-amber-800 border-amber-200 text-xs">
                               Overridden
                             </Badge>

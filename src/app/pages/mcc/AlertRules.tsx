@@ -27,7 +27,7 @@ interface AlertRule {
   operator: string;
   threshold: number;
   severity: string;
-  active: boolean;
+  isActive: boolean;
   createdAt: string;
 }
 
@@ -80,7 +80,7 @@ const emptyForm = () => ({
   operator: 'lt',
   threshold: 0,
   severity: 'warning',
-  active: true,
+  isActive: true,
 });
 
 function buildPaginationPages(current: number, total: number): (number | 'ellipsis')[] {
@@ -162,7 +162,7 @@ export function AlertRules() {
       operator: rule.operator,
       threshold: rule.threshold,
       severity: rule.severity,
-      active: rule.active,
+      isActive: rule.isActive,
     });
     setModalOpen(true);
   };
@@ -199,10 +199,10 @@ export function AlertRules() {
     try {
       await apiRequest(`/admin/alerts/rules/${rule.id}`, {
         method: 'PATCH',
-        body: JSON.stringify({ active: !rule.active }),
+        body: JSON.stringify({ isActive: !rule.isActive }),
       });
       setRules((prev) =>
-        prev.map((r) => (r.id === rule.id ? { ...r, active: !r.active } : r)),
+        prev.map((r) => (r.id === rule.id ? { ...r, isActive: !r.isActive } : r)),
       );
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Toggle failed');
@@ -312,7 +312,7 @@ export function AlertRules() {
                       </td>
                       <td className="py-3 px-4 text-center">
                         <Switch
-                          checked={rule.active}
+                          checked={rule.isActive}
                           onCheckedChange={() => toggleRuleActive(rule)}
                         />
                       </td>
@@ -561,8 +561,8 @@ export function AlertRules() {
               </div>
               <Switch
                 id="rule-active"
-                checked={form.active}
-                onCheckedChange={(checked) => setForm((p) => ({ ...p, active: checked }))}
+                checked={form.isActive}
+                onCheckedChange={(checked) => setForm((p) => ({ ...p, isActive: checked }))}
               />
             </div>
           </div>
