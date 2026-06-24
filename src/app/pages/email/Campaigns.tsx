@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useData, type EmailAbVariant, type EmailContentBlock } from '../../contexts/DataContext';
+import { useData, type Campaign, type EmailAbVariant, type EmailContentBlock } from '../../contexts/DataContext';
 import { Link } from 'react-router';
 import { Plus, Mail, Eye, MousePointerClick, Send, Clock, CheckCircle, BarChart2, MoreHorizontal, X, ShieldCheck, Users, Upload, Globe, AlertCircle } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../../components/ui/card';
@@ -26,17 +26,29 @@ type DomainSummary = {
   mxStatus: string;
 };
 
+type CampaignPreflight = {
+  ready: boolean;
+  fields: Record<string, string>;
+  checklist: Array<{ key: string; label: string; passed: boolean; blocking: boolean }>;
+  blockingErrors: string[];
+  warnings: string[];
+  contentWarnings: Array<{ key: string; label: string; severity: 'warning' | 'error' }>;
+  audience: { total: number; suppressed: number; allowed: number };
+  duplicateName: boolean;
+};
+
 const statusConfig: Record<string, { label: string; className: string; icon: React.ElementType }> = {
   draft: { label: 'Draft', className: 'bg-muted text-muted-foreground', icon: Clock },
   scheduled: { label: 'Scheduled', className: 'bg-sky-50 text-sky-700', icon: Clock },
   sending: { label: 'Sending', className: 'bg-amber-50 text-amber-700', icon: Send },
   sent: { label: 'Sent', className: 'bg-emerald-50 text-emerald-700', icon: CheckCircle },
+  paused: { label: 'Paused', className: 'bg-purple-50 text-purple-700', icon: Clock },
   partial_failed: { label: 'Partial Failed', className: 'bg-orange-50 text-orange-700', icon: ShieldCheck },
   cancelled: { label: 'Cancelled', className: 'bg-red-50 text-red-700', icon: Mail },
 };
 
 export function Campaigns() {
-  const { campaigns, contacts, companies, addCampaign, deleteCampaign, sendCampaignNow, apiError } = useData();
+  const { campaigns, contacts, companies, templates, addCampaign, deleteCampaign, sendCampaignNow, refreshData, apiError } = useData();
   const [filter, setFilter] = useState('all');
   const [showModal, setShowModal] = useState(false);
   const [domains, setDomains] = useState<DomainSummary[]>([]);
@@ -62,13 +74,43 @@ export function Campaigns() {
     gdprConsent: false,
     doubleOptIn: false,
     companyAddress: '',
+    campaignTags: '',
     audienceType: 'customers',
     tag: 'all',
     companyId: 'all',
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [preflight, setPreflight] = useState<CampaignPreflight | null>(null);
+  const [preflightLoading, setPreflightLoading] = useState(false);
+  const [submitError, setSubmitError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [compareResults, setCompareResults] = useState<Array<{ id: string; name: string; openRate: number; clickRate: number; bounceRate: number; totalRecipients: number }> | null>(null);
 
-  const filteredCampaigns = campaigns.filter(c => filter === 'all' || c.status === filter);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [sortBy, setSortBy] = useState<'newest' | 'oldest' | 'name' | 'openRate'>('newest');
+  const [currentPage, setCurrentPage] = useState(1);
+  const campaignsPerPage = 10;
+
+  const filteredCampaigns = useMemo(() => {
+    let result = campaigns.filter(c => filter === 'all' || (filter === 'starred' ? (c as any).starred : c.status === filter));
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      result = result.filter(c => c.name.toLowerCase().includes(q) || c.subject.toLowerCase().includes(q));
+    }
+    result.sort((a, b) => {
+      if (sortBy === 'newest') return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      if (sortBy === 'oldest') return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      if (sortBy === 'name') return a.name.localeCompare(b.name);
+      if (sortBy === 'openRate') return (b.totalRecipients > 0 ? b.openCount / b.totalRecipients : 0) - (a.totalRecipients > 0 ? a.openCount / a.totalRecipients : 0);
+      return 0;
+    });
+    return result;
+  }, [campaigns, filter, searchQuery, sortBy]);
+
+  const totalPages = Math.ceil(filteredCampaigns.length / campaignsPerPage);
+  const paginatedCampaigns = filteredCampaigns.slice((currentPage - 1) * campaignsPerPage, currentPage * campaignsPerPage);
+  useEffect(() => { setCurrentPage(1); }, [filter, searchQuery, sortBy]);
   const marketableContacts = contacts.filter(c => c.marketingConsent);
   const marketableCustomers = marketableContacts.filter(c => c.status === 'customer');
   const availableTags = useMemo(() => Array.from(new Set(contacts.flatMap(c => c.tags))).sort(), [contacts]);
@@ -87,11 +129,12 @@ export function Campaigns() {
     return true;
   }).length, [contacts, recipientFilter]);
   const bodyHtml = builderMode === 'blocks' ? blocksToHtml(form.contentBlocks) : form.body;
+  const currentAudienceCount = preflight?.audience.allowed ?? estimatedRecipients;
   const senderDomainName = form.fromEmail.split('@')[1]?.toLowerCase() ?? '';
   const senderDomain = domains.find(domain => domain.domain === senderDomainName);
   const senderDomainVerified = !!senderDomain && [senderDomain.spfStatus, senderDomain.dkimStatus, senderDomain.dmarcStatus, senderDomain.mxStatus].every(status => status === 'verified');
   const reviewItems = [
-    { label: 'Audience has opted-in recipients', passed: estimatedRecipients > 0, action: '/audience-setup' },
+    { label: 'Audience has opted-in recipients', passed: currentAudienceCount > 0, action: '/audience-setup' },
     { label: 'Sender domain is added', passed: !!senderDomain, action: '/domain-setup' },
     { label: 'Sender domain DNS is verified', passed: senderDomainVerified, action: '/domain-setup' },
     { label: 'Campaign content is ready', passed: !!bodyHtml.trim(), action: null },
@@ -106,40 +149,12 @@ export function Campaigns() {
       .catch(() => setDomains([]));
   }, []);
 
-  const totalSent = campaigns.filter(c => c.status === 'sent').reduce((sum, c) => sum + c.totalRecipients, 0);
-  const totalOpens = campaigns.filter(c => c.status === 'sent').reduce((sum, c) => sum + c.openCount, 0);
-  const totalClicks = campaigns.filter(c => c.status === 'sent').reduce((sum, c) => sum + c.clickCount, 0);
-  const openRate = totalSent > 0 ? (totalOpens / totalSent) * 100 : 0;
-  const clickRate = totalSent > 0 ? (totalClicks / totalSent) * 100 : 0;
-
-  const chartData = campaigns
-    .filter(c => c.status === 'sent')
-    .map(c => ({
-      name: c.name.length > 16 ? c.name.slice(0, 14) + '…' : c.name,
-      openRate: c.totalRecipients > 0 ? +((c.openCount / c.totalRecipients) * 100).toFixed(1) : 0,
-      clickRate: c.totalRecipients > 0 ? +((c.clickCount / c.totalRecipients) * 100).toFixed(1) : 0,
-    }));
-
-  const validate = () => {
-    const e: Record<string, string> = {};
-    if (!form.name.trim()) e.name = 'Campaign name is required';
-    if (!form.subject.trim()) e.subject = 'Subject line is required';
-    if (!form.fromName.trim()) e.fromName = 'Sender name is required';
-    if (!form.fromEmail.trim()) e.fromEmail = 'Sender email is required';
-    if (!bodyHtml.trim()) e.body = 'Email body is required';
-    if (form.status === 'scheduled' && !form.scheduledAt) e.scheduledAt = 'Schedule date is required';
-    return e;
-  };
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const errs = validate();
-    if (Object.keys(errs).length > 0) { setErrors(errs); return; }
+  const buildCampaignPayload = () => {
     const abVariants: EmailAbVariant[] | undefined = form.abTestEnabled ? [
       { id: 'a', label: 'Variant A', subject: form.subject.trim(), previewText: form.previewText.trim() || undefined, body: bodyHtml, contentBlocks: form.contentBlocks },
       { id: 'b', label: 'Variant B', subject: form.variantBSubject.trim() || form.subject.trim(), previewText: form.variantBPreviewText.trim() || undefined, body: form.variantBBody.trim() || bodyHtml },
     ] : undefined;
-    addCampaign({
+    return {
       name: form.name.trim(),
       subject: form.subject.trim(),
       previewText: form.previewText.trim() || undefined,
@@ -164,11 +179,100 @@ export function Campaigns() {
       gdprConsent: form.gdprConsent,
       doubleOptIn: form.doubleOptIn,
       companyAddress: form.companyAddress.trim() || undefined,
+      tags: form.campaignTags ? form.campaignTags.split(',').map(t => t.trim()).filter(Boolean) : [],
       recipientFilter,
-    });
-    setShowModal(false);
-    setForm({ name: '', subject: '', previewText: '', fromName: '', fromEmail: '', replyToEmail: '', body: '', contentBlocks: defaultEmailBlocks(), abTestEnabled: false, selectedVariant: 'a', variantBSubject: '', variantBPreviewText: '', variantBBody: '', status: 'draft', scheduledAt: '', trackOpens: true, trackClicks: true, gdprConsent: false, doubleOptIn: false, companyAddress: '', audienceType: 'customers', tag: 'all', companyId: 'all' });
-    setErrors({});
+    };
+  };
+
+  useEffect(() => {
+    if (!showModal) return;
+    const timer = window.setTimeout(() => {
+      const hasEnoughInput = form.name.trim() || form.subject.trim() || form.fromEmail.trim() || bodyHtml.trim();
+      if (!hasEnoughInput) {
+        setPreflight(null);
+        return;
+      }
+      setPreflightLoading(true);
+      apiRequest<CampaignPreflight>('/email/campaigns/preflight', {
+        method: 'POST',
+        body: JSON.stringify(buildCampaignPayload()),
+      })
+        .then(data => {
+          setPreflight(data);
+          setSubmitError('');
+        })
+        .catch(err => setSubmitError(err instanceof Error ? err.message : 'Unable to run campaign preflight'))
+        .finally(() => setPreflightLoading(false));
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [showModal, form.name, form.subject, form.previewText, form.fromName, form.fromEmail, form.replyToEmail, form.body, form.contentBlocks, form.abTestEnabled, form.selectedVariant, form.variantBSubject, form.variantBPreviewText, form.variantBBody, form.trackOpens, form.trackClicks, form.gdprConsent, form.doubleOptIn, form.companyAddress, form.audienceType, form.tag, form.companyId, form.status, form.scheduledAt, builderMode, bodyHtml]);
+
+  const totalSent = campaigns.filter(c => c.status === 'sent').reduce((sum, c) => sum + c.totalRecipients, 0);
+  const totalOpens = campaigns.filter(c => c.status === 'sent').reduce((sum, c) => sum + c.openCount, 0);
+  const totalClicks = campaigns.filter(c => c.status === 'sent').reduce((sum, c) => sum + c.clickCount, 0);
+  const openRate = totalSent > 0 ? (totalOpens / totalSent) * 100 : 0;
+  const clickRate = totalSent > 0 ? (totalClicks / totalSent) * 100 : 0;
+
+  const chartData = campaigns
+    .filter(c => c.status === 'sent')
+    .map(c => ({
+      name: c.name.length > 16 ? c.name.slice(0, 14) + '…' : c.name,
+      openRate: c.totalRecipients > 0 ? +((c.openCount / c.totalRecipients) * 100).toFixed(1) : 0,
+      clickRate: c.totalRecipients > 0 ? +((c.clickCount / c.totalRecipients) * 100).toFixed(1) : 0,
+    }));
+
+  const validate = () => {
+    const e: Record<string, string> = {};
+    if (!form.name.trim()) e.name = 'Campaign name is required';
+    if (!form.subject.trim()) e.subject = 'Subject line is required';
+    if (!form.fromName.trim()) e.fromName = 'Sender name is required';
+    if (!form.fromEmail.trim()) e.fromEmail = 'Sender email is required';
+    if (!bodyHtml.trim()) e.body = 'Email body is required';
+    if (form.status === 'scheduled' && !form.scheduledAt) e.scheduledAt = 'Schedule date is required';
+    if (form.abTestEnabled) {
+      const variantBChanged = [form.variantBSubject, form.variantBPreviewText, form.variantBBody]
+        .some(value => value.trim().length > 0);
+      if (!variantBChanged) e.abVariants = 'Variant B must differ from Variant A';
+    }
+    return e;
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const errs = validate();
+    if (Object.keys(errs).length > 0) { setErrors(errs); return; }
+    const payload = buildCampaignPayload();
+    setSubmitting(true);
+    setSubmitError('');
+    try {
+      const finalPreflight = await apiRequest<CampaignPreflight>('/email/campaigns/preflight', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      setPreflight(finalPreflight);
+      if (form.status === 'scheduled' && !finalPreflight.ready) {
+        setErrors(finalPreflight.fields);
+        setSubmitError(finalPreflight.blockingErrors.join(', '));
+        return;
+      }
+      if (form.status === 'scheduled') {
+        await apiRequest<Campaign>('/email/campaigns/create-and-schedule', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+        await refreshData();
+      } else {
+        addCampaign(payload);
+      }
+      setShowModal(false);
+      setForm({ name: '', subject: '', previewText: '', fromName: '', fromEmail: '', replyToEmail: '', body: '', contentBlocks: defaultEmailBlocks(), abTestEnabled: false, selectedVariant: 'a', variantBSubject: '', variantBPreviewText: '', variantBBody: '', status: 'draft', scheduledAt: '', trackOpens: true, trackClicks: true, gdprConsent: false, doubleOptIn: false, companyAddress: '', audienceType: 'customers', tag: 'all', companyId: 'all' });
+      setErrors({});
+      setPreflight(null);
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : 'Unable to save campaign');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const set = (field: string, value: string) => {
@@ -199,6 +303,39 @@ export function Campaigns() {
               </button>
             </div>
             <form onSubmit={handleSubmit} className="px-6 py-5 space-y-4">
+              {submitError && (
+                <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                  {submitError}
+                </div>
+              )}
+
+              {templates.length > 0 && (
+                <div className="space-y-1.5">
+                  <Label className="text-sm">Template</Label>
+                  <Select value="none" onValueChange={value => {
+                    const template = templates.find(item => item.id === value);
+                    if (!template) return;
+                    setForm(f => ({
+                      ...f,
+                      subject: template.subject,
+                      body: template.body,
+                      contentBlocks: template.contentBlocks ?? f.contentBlocks,
+                    }));
+                    setBuilderMode(template.contentBlocks?.length ? 'blocks' : 'html');
+                  }}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Start from a saved template" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">No template</SelectItem>
+                      {templates.map(template => (
+                        <SelectItem key={template.id} value={template.id}>{template.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+
               <div className="space-y-1.5">
                 <Label htmlFor="camp-name" className="text-sm">Campaign Name</Label>
                 <Input
@@ -309,8 +446,8 @@ export function Campaigns() {
               <div className="space-y-3">
                 <div className="flex items-center justify-between rounded-lg border border-border p-3">
                   <div>
-                    <Label className="text-sm">A/B Test</Label>
-                    <p className="text-xs text-muted-foreground">Test an alternate subject, preview text, or body for this draft.</p>
+                    <Label className="text-sm">Manual Variant Test</Label>
+                    <p className="text-xs text-muted-foreground">Store two versions and choose which one sends. Automatic winner selection is not enabled yet.</p>
                   </div>
                   <Switch checked={form.abTestEnabled} onCheckedChange={v => setForm(f => ({ ...f, abTestEnabled: v }))} />
                 </div>
@@ -340,6 +477,7 @@ export function Campaigns() {
                     </div>
                   </div>
                 )}
+                {errors.abVariants && <p className="text-xs text-destructive">{errors.abVariants}</p>}
               </div>
 
               <Separator />
@@ -347,8 +485,15 @@ export function Campaigns() {
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
                   <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Audience</p>
-                  <Badge variant="secondary" className="text-xs">{estimatedRecipients} estimated recipients</Badge>
+                  <Badge variant="secondary" className="text-xs">
+                    {preflightLoading ? 'Checking...' : `${currentAudienceCount} backend-verified recipients`}
+                  </Badge>
                 </div>
+                {preflight && (
+                  <div className="rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                    {preflight.audience.total} matched, {preflight.audience.suppressed} suppressed, {preflight.audience.allowed} allowed
+                  </div>
+                )}
                 <div className="grid grid-cols-2 gap-3">
                   <div className="space-y-1.5">
                     <Label className="text-sm">Recipient Group</Label>
@@ -426,6 +571,16 @@ export function Campaigns() {
                     onChange={e => set('companyAddress', e.target.value)}
                   />
                 </div>
+                <div className="space-y-2">
+                  <Label htmlFor="camp-tags">Campaign Tags</Label>
+                  <Input
+                    id="camp-tags"
+                    placeholder="tag1, tag2, tag3 (comma-separated)"
+                    value={form.campaignTags}
+                    onChange={e => set('campaignTags', e.target.value)}
+                  />
+                  <p className="text-xs text-muted-foreground">Organize campaigns with tags for easy filtering</p>
+                </div>
               </div>
 
               <Separator />
@@ -438,16 +593,26 @@ export function Campaigns() {
                   </Badge>
                 </div>
                 <div className="grid gap-2 md:grid-cols-2">
-                  {reviewItems.map(item => (
+                  {(preflight?.checklist ?? reviewItems).map(item => (
                     <div key={item.label} className="flex items-center justify-between rounded-lg border border-border p-2 text-xs">
                       <span className="flex items-center gap-2">
                         {item.passed ? <CheckCircle className="h-3.5 w-3.5 text-emerald-600" /> : <AlertCircle className="h-3.5 w-3.5 text-amber-600" />}
                         {item.label}
                       </span>
-                      {!item.passed && item.action && <Link to={item.action} className="text-primary hover:underline">Fix</Link>}
+                      {'action' in item && !item.passed && item.action && <Link to={item.action} className="text-primary hover:underline">Fix</Link>}
                     </div>
                   ))}
                 </div>
+                {preflight?.warnings.map(warning => (
+                  <div key={warning} className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                    {warning}
+                  </div>
+                ))}
+                {preflight?.contentWarnings.map(warning => (
+                  <div key={warning.key} className={`rounded-lg border px-3 py-2 text-xs ${warning.severity === 'error' ? 'border-destructive/30 bg-destructive/10 text-destructive' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
+                    {warning.label}
+                  </div>
+                ))}
                 {form.fromEmail && !senderDomainVerified && (
                   <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
                     The sender domain must be added and fully verified before sending or scheduling.
@@ -488,9 +653,9 @@ export function Campaigns() {
                 <Button type="button" variant="outline" size="sm" onClick={() => setShowModal(false)}>
                   Cancel
                 </Button>
-                <Button type="submit" size="sm">
+                <Button type="submit" size="sm" disabled={submitting}>
                   <Plus className="h-3.5 w-3.5 mr-1.5" />
-                  {form.status === 'scheduled' ? 'Schedule Campaign' : 'Save as Draft'}
+                  {submitting ? 'Saving...' : form.status === 'scheduled' ? 'Schedule Campaign' : 'Save as Draft'}
                 </Button>
               </div>
             </form>
@@ -649,12 +814,53 @@ export function Campaigns() {
           <TabsTrigger value="draft" className="text-xs">Drafts</TabsTrigger>
           <TabsTrigger value="scheduled" className="text-xs">Scheduled</TabsTrigger>
           <TabsTrigger value="sent" className="text-xs">Sent</TabsTrigger>
+          <TabsTrigger value="starred" className="text-xs">Starred</TabsTrigger>
         </TabsList>
       </Tabs>
 
+      {/* Bulk Actions */}
+      {selectedIds.size > 0 && (
+        <div className="flex items-center gap-3 p-3 bg-indigo-50 rounded-lg">
+          <span className="text-sm font-medium text-indigo-700">{selectedIds.size} selected</span>
+          <Button variant="destructive" size="sm" onClick={async () => {
+            if (!confirm(`Delete ${selectedIds.size} campaign(s)?`)) return;
+            await apiRequest('/email/campaigns/bulk-delete', { method: 'POST', body: JSON.stringify({ ids: [...selectedIds] }) });
+            setSelectedIds(new Set());
+            refreshData();
+          }}>Delete Selected</Button>
+          {selectedIds.size >= 2 && (
+            <Button variant="outline" size="sm" onClick={async () => {
+              const result = await apiRequest<typeof compareResults>('/email/campaigns/compare', { method: 'POST', body: JSON.stringify({ ids: [...selectedIds] }) });
+              setCompareResults(result);
+            }}>Compare ({selectedIds.size})</Button>
+          )}
+          <Button variant="outline" size="sm" onClick={() => setSelectedIds(new Set())}>Clear</Button>
+        </div>
+      )}
+
+      {/* Search & Sort */}
+      <div className="flex gap-3 items-center">
+        <Input
+          placeholder="Search campaigns..."
+          value={searchQuery}
+          onChange={e => setSearchQuery(e.target.value)}
+          className="max-w-xs h-9"
+        />
+        <Select value={sortBy} onValueChange={v => setSortBy(v as typeof sortBy)}>
+          <SelectTrigger className="w-[140px] h-9"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="newest">Newest</SelectItem>
+            <SelectItem value="oldest">Oldest</SelectItem>
+            <SelectItem value="name">Name</SelectItem>
+            <SelectItem value="openRate">Open Rate</SelectItem>
+          </SelectContent>
+        </Select>
+        <span className="text-xs text-muted-foreground ml-auto">{filteredCampaigns.length} campaign{filteredCampaigns.length !== 1 ? 's' : ''}</span>
+      </div>
+
       {/* Campaigns Cards */}
       <div className="space-y-3">
-        {filteredCampaigns.map((campaign) => {
+        {paginatedCampaigns.map((campaign) => {
           const cfg = statusConfig[campaign.status];
           const StatusIcon = cfg.icon;
           const campaignOpenRate = campaign.totalRecipients > 0
@@ -667,11 +873,28 @@ export function Campaigns() {
               <CardContent className="p-5">
                 <div className="flex flex-col sm:flex-row sm:items-start gap-4">
                   <div className="flex items-start gap-3 flex-1 min-w-0">
+                    <input
+                      type="checkbox"
+                      className="mt-2 h-4 w-4 rounded border-gray-300 text-indigo-600 shrink-0"
+                      checked={selectedIds.has(campaign.id)}
+                      onChange={e => {
+                        const next = new Set(selectedIds);
+                        e.target.checked ? next.add(campaign.id) : next.delete(campaign.id);
+                        setSelectedIds(next);
+                      }}
+                      onClick={e => e.stopPropagation()}
+                    />
                     <div className="p-2.5 rounded-xl bg-indigo-50 shrink-0">
                       <Mail className="h-5 w-5 text-indigo-600" />
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
+                        <button
+                          className="text-gray-300 hover:text-yellow-400 transition-colors"
+                          onClick={async (e) => { e.stopPropagation(); await apiRequest(`/email/campaigns/${campaign.id}/toggle-star`, { method: 'POST' }); refreshData(); }}
+                        >
+                          {(campaign as any).starred ? <span className="text-yellow-400">&#9733;</span> : <span>&#9734;</span>}
+                        </button>
                         <Link to={`/campaigns/${campaign.id}`}>
                           <h3 className="text-sm font-semibold text-foreground group-hover:text-primary transition-colors">{campaign.name}</h3>
                         </Link>
@@ -684,6 +907,13 @@ export function Campaigns() {
                       <p className="text-xs text-muted-foreground/60 mt-0.5">
                         From: {campaign.fromName} &lt;{campaign.fromEmail}&gt;
                       </p>
+                      {(campaign as any).tags?.length > 0 && (
+                        <div className="flex gap-1 mt-1 flex-wrap">
+                          {((campaign as any).tags as string[]).map(tag => (
+                            <span key={tag} className="text-[10px] bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded">{tag}</span>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
 
@@ -760,7 +990,44 @@ export function Campaigns() {
         })}
       </div>
 
-      {filteredCampaigns.length === 0 && (
+      {/* Compare Modal */}
+      {compareResults && (
+        <Card>
+          <CardContent className="p-5">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-semibold text-foreground">Campaign Comparison</h3>
+              <button onClick={() => setCompareResults(null)} className="text-gray-400 hover:text-gray-600 text-lg">&times;</button>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead><tr className="text-left text-muted-foreground border-b"><th className="pb-2 pr-4">Campaign</th><th className="pb-2 pr-4 text-right">Recipients</th><th className="pb-2 pr-4 text-right">Open Rate</th><th className="pb-2 pr-4 text-right">Click Rate</th><th className="pb-2 text-right">Bounce Rate</th></tr></thead>
+                <tbody>
+                  {compareResults.map(c => (
+                    <tr key={c.id} className="border-b border-gray-100">
+                      <td className="py-2 pr-4 font-medium">{c.name}</td>
+                      <td className="py-2 pr-4 text-right">{c.totalRecipients}</td>
+                      <td className="py-2 pr-4 text-right font-medium text-blue-600">{(c.openRate * 100).toFixed(1)}%</td>
+                      <td className="py-2 pr-4 text-right font-medium text-purple-600">{(c.clickRate * 100).toFixed(1)}%</td>
+                      <td className="py-2 text-right text-orange-600">{(c.bounceRate * 100).toFixed(1)}%</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Pagination */}
+      {totalPages > 1 && (
+        <div className="flex items-center justify-center gap-2 pt-2">
+          <Button variant="outline" size="sm" disabled={currentPage <= 1} onClick={() => setCurrentPage(p => p - 1)}>Previous</Button>
+          <span className="text-sm text-muted-foreground">Page {currentPage} of {totalPages}</span>
+          <Button variant="outline" size="sm" disabled={currentPage >= totalPages} onClick={() => setCurrentPage(p => p + 1)}>Next</Button>
+        </div>
+      )}
+
+      {paginatedCampaigns.length === 0 && (
         <Card>
           <CardContent className="py-16 text-center">
             <Mail className="h-10 w-10 mx-auto mb-3 text-muted-foreground/30" />

@@ -110,19 +110,63 @@ function TemplateModal({ onClose, onSave, aiMode = false }: { onClose: () => voi
   );
 }
 
+function EditTemplateModal({ template, onClose, onSave }: { template: EmailTemplate; onClose: () => void; onSave: (updates: Partial<EmailTemplate>) => void }) {
+  const [name, setName] = useState(template.name);
+  const [subject, setSubject] = useState(template.subject);
+  const [body, setBody] = useState(template.body ?? '');
+  const [category, setCategory] = useState(template.category ?? 'promotional');
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="w-full max-w-2xl rounded-lg bg-white p-6 shadow-xl space-y-4 max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-semibold">Edit Template</h2>
+          <button onClick={onClose}><X className="h-5 w-5 text-gray-400" /></button>
+        </div>
+        <div className="space-y-3">
+          <div><Label>Name</Label><Input value={name} onChange={e => setName(e.target.value)} /></div>
+          <div><Label>Subject</Label><Input value={subject} onChange={e => setSubject(e.target.value)} /></div>
+          <div>
+            <Label>Category</Label>
+            <select className="w-full rounded-md border px-3 py-2 text-sm" value={category} onChange={e => setCategory(e.target.value)}>
+              {categories.map(c => <option key={c} value={c}>{c.replace(/_/g, ' ')}</option>)}
+            </select>
+          </div>
+          <div><Label>Body (HTML)</Label><Textarea rows={10} className="font-mono text-sm" value={body} onChange={e => setBody(e.target.value)} /></div>
+        </div>
+        <div className="flex gap-2 pt-2">
+          <Button onClick={() => onSave({ name, subject, body, category })}>Save Changes</Button>
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function Templates() {
-  const { templates, addTemplate, deleteTemplate, apiError } = useData();
+  const { templates, addTemplate, updateTemplate, deleteTemplate, apiError } = useData();
   const [search, setSearch] = useState('');
   const [modal, setModal] = useState<'blank' | 'ai' | null>(null);
+  const [editingTemplate, setEditingTemplate] = useState<EmailTemplate | null>(null);
+  const [categoryFilter, setCategoryFilter] = useState('all');
 
-  const filtered = templates.filter(template =>
-    template.name.toLowerCase().includes(search.toLowerCase()) ||
-    template.subject.toLowerCase().includes(search.toLowerCase()),
-  );
+  const uniqueCategories = [...new Set(templates.map(t => t.category).filter(Boolean))];
+  const filtered = templates.filter(template => {
+    const matchesSearch = template.name.toLowerCase().includes(search.toLowerCase()) || template.subject.toLowerCase().includes(search.toLowerCase());
+    const matchesCategory = categoryFilter === 'all' || template.category === categoryFilter;
+    return matchesSearch && matchesCategory;
+  });
 
   return (
     <div className="mx-auto max-w-7xl space-y-5">
       {modal && <TemplateModal aiMode={modal === 'ai'} onClose={() => setModal(null)} onSave={addTemplate} />}
+      {editingTemplate && (
+        <EditTemplateModal
+          template={editingTemplate}
+          onClose={() => setEditingTemplate(null)}
+          onSave={(updates) => { updateTemplate(editingTemplate.id, updates); setEditingTemplate(null); }}
+        />
+      )}
       {apiError && <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-2 text-sm text-destructive">{apiError}</div>}
 
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -142,9 +186,16 @@ export function Templates() {
         </div>
       </div>
 
-      <div className="relative max-w-sm">
-        <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-        <Input className="pl-9" placeholder="Search templates..." value={search} onChange={event => setSearch(event.target.value)} />
+      <div className="flex gap-3 items-center">
+        <div className="relative max-w-xs flex-1">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input className="pl-9" placeholder="Search templates..." value={search} onChange={event => setSearch(event.target.value)} />
+        </div>
+        <select className="rounded-md border border-gray-300 px-3 py-2 text-sm h-9" value={categoryFilter} onChange={e => setCategoryFilter(e.target.value)}>
+          <option value="all">All Categories</option>
+          {uniqueCategories.map(c => <option key={c} value={c!}>{(c ?? '').replace(/_/g, ' ')}</option>)}
+        </select>
+        <span className="text-xs text-muted-foreground">{filtered.length} template{filtered.length !== 1 ? 's' : ''}</span>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -163,12 +214,17 @@ export function Templates() {
               </div>
               <div className="flex items-center justify-between text-xs text-muted-foreground">
                 <span>Created {new Date(template.createdAt).toLocaleDateString()}</span>
-                <button className="inline-flex items-center gap-1 text-destructive hover:underline" onClick={() => {
-                  if (window.confirm(`Delete ${template.name}?`)) deleteTemplate(template.id);
-                }}>
-                  <Trash2 className="h-3.5 w-3.5" />
-                  Delete
-                </button>
+                <div className="flex gap-3">
+                  <button className="inline-flex items-center gap-1 text-primary hover:underline" onClick={() => setEditingTemplate(template)}>
+                    Edit
+                  </button>
+                  <button className="inline-flex items-center gap-1 text-destructive hover:underline" onClick={() => {
+                    if (window.confirm(`Delete ${template.name}?`)) deleteTemplate(template.id);
+                  }}>
+                    <Trash2 className="h-3.5 w-3.5" />
+                    Delete
+                  </button>
+                </div>
               </div>
             </CardContent>
           </Card>

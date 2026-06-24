@@ -3,6 +3,9 @@ import { Worker } from 'bullmq';
 import IORedis from 'ioredis';
 import { CampaignStatus, DnsRecordStatus, EmailEventType, JobStatus, PrismaClient } from '@prisma/client';
 import { createHash, createCipheriv, createDecipheriv, randomBytes } from 'crypto';
+import { Resolver } from 'dns/promises';
+import { renderEmailWithTracking, resolveSelectedVariant, resolveVariantById, getVariantIds, htmlToPlainText } from './email/email-rendering';
+import { sendViaSendGrid } from './providers/services/email-delivery.util';
 
 const redisUrl = process.env.REDIS_URL;
 if (!redisUrl) {
@@ -19,49 +22,141 @@ async function processEmailCampaign(data: Record<string, unknown>) {
   const campaign = await prisma.emailCampaign.findUnique({ where: { id: campaignId } });
   if (!campaign) return { skipped: true, reason: 'campaign not found' };
   if (campaign.status === CampaignStatus.cancelled) return { skipped: true, reason: 'campaign cancelled' };
+  if (campaign.status === CampaignStatus.paused) return { skipped: true, reason: 'campaign paused' };
 
   await prisma.emailCampaign.update({
     where: { id: campaignId },
     data: { status: CampaignStatus.sending, lastError: null },
   });
 
+  const senderDomain = campaign.fromEmail?.split('@')[1]?.toLowerCase();
+  const domainRecord = senderDomain
+    ? await prisma.sendingDomain.findFirst({ where: { tenantId: campaign.tenantId, domain: senderDomain } })
+    : null;
+  const domainCap = domainRecord?.currentDailyCap ?? 5000;
+  const domainRemaining = Math.max(domainCap - (domainRecord?.sentToday ?? 0), 0);
+  const effectiveLimit = Math.min(campaign.dailySendLimit ?? 5000, domainRemaining);
+
+  if (effectiveLimit <= 0) {
+    console.warn(`[WARMUP] Domain ${senderDomain} daily cap reached (${domainCap}). Re-enqueueing campaign ${campaignId} for tomorrow.`);
+    const queue = new (await import('bullmq')).Queue('email-campaigns', { connection: connection as never });
+    await queue.add('email.campaign.resume', { campaignId }, { delay: 86400000 });
+    await queue.close();
+    return { processed: true, sent: 0, reason: 'domain daily cap reached, re-enqueued for tomorrow' };
+  }
+
   const recipients = await prisma.campaignRecipient.findMany({
-    where: { campaignId, status: 'queued' },
-    take: Math.max(campaign.dailySendLimit ?? 5000, 1),
+    where: { campaignId, status: 'queued', sentAt: null, providerRequestId: null },
+    take: Math.max(effectiveLimit, 1),
   });
   let sent = 0;
   let failed = 0;
+  const variantIds = getVariantIds(campaign);
+  const isAbTest = campaign.abTestEnabled && variantIds.length >= 2;
 
-  for (const recipient of recipients) {
+  for (let ri = 0; ri < recipients.length; ri++) {
+    const recipient = recipients[ri];
+    const assignedVariantId = isAbTest ? variantIds[ri % variantIds.length] : undefined;
+    const selected = assignedVariantId ? resolveVariantById(campaign, assignedVariantId) : resolveSelectedVariant(campaign);
     const latest = await prisma.emailCampaign.findUnique({ where: { id: campaignId }, select: { status: true } });
     if (latest?.status === CampaignStatus.cancelled) break;
+    if (failed >= 10 && failed / Math.max(sent + failed, 1) >= 0.25) {
+      await prisma.emailCampaign.update({
+        where: { id: campaignId },
+        data: { status: CampaignStatus.partial_failed, completedAt: new Date(), lastError: 'Campaign paused because provider failures exceeded 25%' },
+      });
+      break;
+    }
     try {
-      const html = await withTracking(campaign.body, campaign.tenantId, campaign.id, recipient.id, recipient.email, campaign.trackOpens, campaign.trackClicks);
-      const requestId = await sendViaSendGrid({
+      const claimed = await prisma.campaignRecipient.updateMany({
+        where: { id: recipient.id, status: 'queued', sentAt: null, providerRequestId: null },
+        data: { attempts: { increment: 1 }, ...(assignedVariantId ? { variantId: assignedVariantId } : {}) },
+      });
+      if (claimed.count === 0) continue;
+
+      const mergeBody = (selected.body ?? '')
+        .replace(/\{\{firstName\}\}/g, recipient.firstName ?? '')
+        .replace(/\{\{first_name\}\}/g, recipient.firstName ?? '')
+        .replace(/\{\{lastName\}\}/g, recipient.lastName ?? '')
+        .replace(/\{\{last_name\}\}/g, recipient.lastName ?? '')
+        .replace(/\{\{email\}\}/g, recipient.email)
+        .replace(/\{\{companyName\}\}/g, campaign.fromName ?? '')
+        .replace(/\{\{company\}\}/g, campaign.fromName ?? '');
+      const mergeSubject = (selected.subject ?? '')
+        .replace(/\{\{firstName\}\}/g, recipient.firstName ?? '')
+        .replace(/\{\{first_name\}\}/g, recipient.firstName ?? '')
+        .replace(/\{\{lastName\}\}/g, recipient.lastName ?? '')
+        .replace(/\{\{last_name\}\}/g, recipient.lastName ?? '')
+        .replace(/\{\{email\}\}/g, recipient.email)
+        .replace(/\{\{companyName\}\}/g, campaign.fromName ?? '')
+        .replace(/\{\{company\}\}/g, campaign.fromName ?? '');
+
+      const rendered = await renderEmailWithTracking({
+        store: prisma,
+        body: mergeBody,
         tenantId: campaign.tenantId,
         campaignId: campaign.id,
         recipientId: recipient.id,
-        to: recipient.email,
-        fromEmail: campaign.fromEmail,
-        fromName: campaign.fromName,
-        subject: campaign.subject,
-        html,
-        text: campaign.bodyPlainText,
-        replyTo: campaign.replyToEmail,
+        email: recipient.email,
+        trackOpens: campaign.trackOpens,
+        trackClicks: campaign.trackClicks,
+        companyAddress: campaign.companyAddress,
+        subject: mergeSubject,
       });
+      const html = rendered?.html ?? mergeBody;
+      const unsubscribeUrl = rendered?.unsubscribeUrl;
+      const plainText = campaign.bodyPlainText
+        || htmlToPlainText(mergeBody) + (campaign.companyAddress ? `\n\n${campaign.companyAddress}` : '') + (unsubscribeUrl ? `\n\nUnsubscribe: ${unsubscribeUrl}` : '');
+
+      let result: { provider: string; requestId?: string };
+      let lastSendError: unknown;
+      for (let retry = 0; retry < 3; retry++) {
+        try {
+          result = await sendViaSendGrid({
+            tenantId: campaign.tenantId,
+            campaignId: campaign.id,
+            recipientId: recipient.id,
+            to: recipient.email,
+            fromEmail: campaign.fromEmail,
+            fromName: campaign.fromName,
+            subject: mergeSubject,
+            html,
+            text: plainText,
+            replyTo: campaign.replyToEmail,
+            unsubscribeUrl,
+            ipPool: campaign.ipPool ?? undefined,
+          }, prisma);
+          lastSendError = null;
+          break;
+        } catch (err) {
+          lastSendError = err;
+          const msg = err instanceof Error ? err.message : String(err);
+          const isTransient = /429|5\d{2}|ETIMEDOUT|ECONNRESET|socket hang up/i.test(msg);
+          if (!isTransient || retry === 2) break;
+          await new Promise(r => setTimeout(r, 1000 * Math.pow(2, retry)));
+        }
+      }
+      if (lastSendError) throw lastSendError;
+
       await prisma.campaignRecipient.update({
         where: { id: recipient.id },
-        data: { status: 'sent', sentAt: new Date(), attempts: { increment: 1 }, providerRequestId: requestId, lastError: null },
+        data: { status: 'sent', sentAt: new Date(), providerRequestId: result!.requestId, lastError: null },
       });
       await prisma.emailEvent.create({
         data: {
           campaignId: campaign.id,
           recipientId: recipient.id,
           type: EmailEventType.delivered,
-          providerId: requestId,
-          eventKey: requestId ? `sendgrid:${requestId}` : `local:${recipient.id}:delivered`,
+          providerId: result!.requestId,
+          eventKey: result!.requestId ? `sendgrid:${result!.requestId}` : `local:${recipient.id}:delivered`,
         },
       }).catch(() => undefined);
+      if (domainRecord) {
+        await prisma.sendingDomain.update({ where: { id: domainRecord.id }, data: { sentToday: { increment: 1 } } }).catch(() => undefined);
+      }
+      if (recipient.contactId) {
+        await prisma.contact.update({ where: { id: recipient.contactId }, data: { lastEmailSentAt: new Date(), emailSendCount: { increment: 1 } } }).catch(() => undefined);
+      }
       sent++;
     } catch (error) {
       failed++;
@@ -69,7 +164,6 @@ async function processEmailCampaign(data: Record<string, unknown>) {
         where: { id: recipient.id },
         data: {
           status: recipient.attempts + 1 >= 3 ? 'failed' : 'queued',
-          attempts: { increment: 1 },
           failedAt: new Date(),
           lastError: error instanceof Error ? error.message : String(error),
         },
@@ -101,9 +195,18 @@ async function processEmailCampaign(data: Record<string, unknown>) {
       status: nextStatus,
       sentAt: nextStatus === CampaignStatus.sent || nextStatus === CampaignStatus.partial_failed ? new Date() : undefined,
       completedAt: nextStatus === CampaignStatus.sent || nextStatus === CampaignStatus.partial_failed ? new Date() : undefined,
-      lastError: permanentFailures > 0 ? `${permanentFailures} recipients failed` : null,
+      lastError: remaining > 0
+        ? `Sent ${sent} today (domain cap: ${domainCap}/day). ${remaining} recipients will be sent tomorrow.`
+        : permanentFailures > 0 ? `${permanentFailures} recipients failed` : null,
     },
   });
+
+  if (remaining > 0 && nextStatus === CampaignStatus.sending) {
+    console.log(`[WARMUP] Campaign ${campaignId}: sent ${sent}, ${remaining} remaining — re-enqueued for tomorrow`);
+    const queue = new (await import('bullmq')).Queue('email-campaigns', { connection: connection as never });
+    await queue.add('email.campaign.resume', { campaignId }, { delay: 86400000 });
+    await queue.close();
+  }
 
   return { processed: true, sent, failed, remaining };
 }
@@ -197,6 +300,9 @@ async function processColdSequenceTick(data: Record<string, unknown>) {
     if (mailbox.sentToday >= mailbox.dailySendLimit) continue;
     mailboxIndex++;
 
+    const senderName = mailbox.fromName ?? mailbox.email.split('@')[0];
+    const senderFirstName = senderName.split(' ')[0] ?? senderName;
+    const senderLastName = senderName.split(' ').slice(1).join(' ') ?? '';
     const renderTemplate = (text: string) =>
       text
         .replace(/\{\{firstName\}\}/g, prospect.firstName ?? '')
@@ -204,13 +310,19 @@ async function processColdSequenceTick(data: Record<string, unknown>) {
         .replace(/\{\{lastName\}\}/g, prospect.lastName ?? '')
         .replace(/\{\{last_name\}\}/g, prospect.lastName ?? '')
         .replace(/\{\{company\}\}/g, prospect.companyName ?? '')
+        .replace(/\{\{companyName\}\}/g, prospect.companyName ?? '')
         .replace(/\{\{jobTitle\}\}/g, prospect.jobTitle ?? '')
         .replace(/\{\{job_title\}\}/g, prospect.jobTitle ?? '')
-        .replace(/\{\{email\}\}/g, prospect.email);
+        .replace(/\{\{email\}\}/g, prospect.email)
+        .replace(/\{\{senderFirstName\}\}/g, senderFirstName)
+        .replace(/\{\{senderLastName\}\}/g, senderLastName)
+        .replace(/\{\{senderName\}\}/g, senderName)
+        .replace(/\{\{senderEmail\}\}/g, mailbox.email);
 
     const subject = renderTemplate(currentStep.subject ?? '');
-    let body = renderTemplate(currentStep.body);
-    body = await withTracking(body, campaign.tenantId ?? '', campaignId, state.prospectId, prospect.email, campaign.trackOpens, campaign.trackClicks) ?? body;
+    const rawBody = renderTemplate(currentStep.body);
+    const coldRendered = await renderEmailWithTracking({ store: prisma, body: rawBody, tenantId: campaign.tenantId ?? '', campaignId, recipientId: state.prospectId, email: prospect.email, trackOpens: campaign.trackOpens, trackClicks: campaign.trackClicks });
+    const body = coldRendered?.html ?? rawBody;
 
     try {
       await sendViaSendGrid({
@@ -223,7 +335,7 @@ async function processColdSequenceTick(data: Record<string, unknown>) {
         subject,
         html: body,
         replyTo: mailbox.replyToEmail,
-      });
+      }, prisma);
 
       await prisma.coldEmailEvent.create({
         data: { campaignId, prospectId: state.prospectId, type: 'sent', stepOrder: currentStep.stepOrder, metadata: {} },
@@ -362,7 +474,7 @@ async function processMailboxWarmup(data: Record<string, unknown>) {
       fromName: mailbox.fromName ?? mailbox.email,
       subject: warmupSubjects[Math.floor(Math.random() * warmupSubjects.length)],
       html: `<p>${warmupBodies[Math.floor(Math.random() * warmupBodies.length)]}</p>`,
-    });
+    }, prisma);
 
     if (todayLog) {
       await prisma.warmupLog.update({ where: { id: todayLog.id }, data: { emailsSent: { increment: 1 } } });
@@ -841,7 +953,9 @@ async function processSystemCron(_data: Record<string, unknown>) {
   // 1. Reset sentToday at midnight UTC
   if (hour === 0) {
     const resetResult = await prisma.coldMailbox.updateMany({ where: { sentToday: { gt: 0 } }, data: { sentToday: 0 } });
+    const domainReset = await prisma.sendingDomain.updateMany({ where: { sentToday: { gt: 0 } }, data: { sentToday: 0 } });
     results.sentTodayReset = resetResult.count;
+    results.domainSentTodayReset = domainReset.count;
   }
 
   // 2. Auto-advance warmup for personas who met daily target
@@ -872,6 +986,25 @@ async function processSystemCron(_data: Record<string, unknown>) {
   }
   results.warmupAdvanced = warmupAdvanced;
 
+  // 2b. Schedule warmup emails for all active warming mailboxes that haven't been enqueued
+  if (hour >= 8 && hour <= 17 && dayOfWeek >= 1 && dayOfWeek <= 5) {
+    const warmingMailboxes = await prisma.coldMailbox.findMany({
+      where: { status: 'active', warmupEnabled: true, warmupStatus: 'warming' },
+    });
+    const warmupQueue = new (await import('bullmq')).Queue('mailbox-warmup', { connection: connection as never });
+    const existingJobs = await warmupQueue.getWaiting();
+    const enqueuedMailboxIds = new Set(existingJobs.map((j: any) => j.data?.mailboxId).filter(Boolean));
+    let warmupEnqueued = 0;
+    for (const mb of warmingMailboxes) {
+      if (enqueuedMailboxIds.has(mb.id)) continue;
+      if (mb.sentToday >= mb.dailySendLimit) continue;
+      await warmupQueue.add('warmup', { mailboxId: mb.id, tenantId: mb.tenantId }, { delay: Math.floor(Math.random() * 300000) });
+      warmupEnqueued++;
+    }
+    await warmupQueue.close();
+    results.warmupEnqueued = warmupEnqueued;
+  }
+
   // 3. Bounce monitoring — auto-pause mailboxes with bounce > 5%
   const activeMailboxes = await prisma.coldMailbox.findMany({ where: { status: 'active', totalSent: { gt: 50 } } });
   let paused = 0;
@@ -893,25 +1026,18 @@ async function processSystemCron(_data: Record<string, unknown>) {
     const domains = await prisma.sendingDomain.findMany({ where: { healthScore: { gt: -1 } }, take: 20 });
     for (const domain of domains) {
       try {
-        const dns = await import('dns');
-        const hasMx = await new Promise<boolean>((resolve) => {
-          dns.resolveMx(domain.domain, (err, addresses) => resolve(!err && addresses && addresses.length > 0));
-        });
+        const dnsResolver = new Resolver();
+        dnsResolver.setServers(['8.8.8.8', '1.1.1.1']);
+        const hasMx = await dnsResolver.resolveMx(domain.domain).then(a => a.length > 0).catch(() => false);
         let score = hasMx ? 25 : 0;
-        const hasTxt = await new Promise<boolean>((resolve) => {
-          dns.resolveTxt(domain.domain, (err, records) => {
-            if (err || !records) { resolve(false); return; }
-            const flat = records.map(r => r.join('')).join(' ');
-            resolve(flat.includes('v=spf1'));
-          });
-        });
+        const hasTxt = await dnsResolver.resolveTxt(domain.domain).then(records => {
+          const flat = records.map(r => r.join('')).join(' ');
+          return flat.includes('v=spf1');
+        }).catch(() => false);
         score += hasTxt ? 25 : 0;
-        const hasDmarc = await new Promise<boolean>((resolve) => {
-          dns.resolveTxt(`_dmarc.${domain.domain}`, (err, records) => {
-            if (err || !records) { resolve(false); return; }
-            resolve(records.some(r => r.join('').includes('v=DMARC1')));
-          });
-        });
+        const hasDmarc = await dnsResolver.resolveTxt(`_dmarc.${domain.domain}`).then(records => {
+          return records.some(r => r.join('').includes('v=DMARC1'));
+        }).catch(() => false);
         score += hasDmarc ? 25 : 0;
         score += 25; // DKIM assumed if other records present
         await prisma.sendingDomain.update({ where: { id: domain.id }, data: {
@@ -962,6 +1088,27 @@ async function processSystemCron(_data: Record<string, unknown>) {
     }
     results.domainIntelligence = { domainsChecked: allDomains.length, recovered: pausedMailboxes.filter(mb => Number(mb.bounceRate) < 3).length };
   }
+
+  // 5b. Recover email marketing campaigns stuck in 'sending' for > 30 minutes
+  const stuckCutoff = new Date(now.getTime() - 30 * 60 * 1000);
+  const stuckCampaigns = await prisma.emailCampaign.findMany({
+    where: { status: CampaignStatus.sending, updatedAt: { lt: stuckCutoff } },
+  });
+  for (const sc of stuckCampaigns) {
+    const remaining = await prisma.campaignRecipient.count({ where: { campaignId: sc.id, status: 'queued' } });
+    const failedCount = await prisma.campaignRecipient.count({ where: { campaignId: sc.id, status: 'failed' } });
+    const nextStatus = remaining > 0 ? CampaignStatus.partial_failed : failedCount > 0 ? CampaignStatus.partial_failed : CampaignStatus.sent;
+    await prisma.emailCampaign.update({
+      where: { id: sc.id },
+      data: {
+        status: nextStatus,
+        completedAt: new Date(),
+        lastError: remaining > 0 ? `Campaign recovered from stuck state — ${remaining} recipients unsent` : null,
+      },
+    });
+    console.warn(`[RECOVERY] Campaign ${sc.id} was stuck in 'sending' since ${sc.updatedAt.toISOString()} — set to ${nextStatus}`);
+  }
+  results.stuckCampaignsRecovered = stuckCampaigns.length;
 
   // 6. Auto-pause stale draft campaigns (> 30 days)
   if (hour === 3) {
@@ -1017,6 +1164,31 @@ async function processSystemCron(_data: Record<string, unknown>) {
     results.unhandledReminders = unhandled.length;
   }
 
+  // 8. Send scheduled reports
+  const dueReports = await prisma.scheduledReport.findMany({
+    where: { enabled: true, nextSendAt: { lte: now } },
+  });
+  for (const report of dueReports) {
+    try {
+      const campaigns = await prisma.emailCampaign.findMany({
+        where: { tenantId: report.tenantId, status: { in: ['sent', 'partial_failed', 'sending'] } },
+        select: { name: true, totalRecipients: true, openCount: true, clickCount: true, bounceCount: true, sentAt: true },
+        orderBy: { createdAt: 'desc' }, take: 10,
+      });
+      const rows = campaigns.map(c =>
+        `<tr><td style="padding:8px;border-bottom:1px solid #eee">${c.name}</td><td style="padding:8px;border-bottom:1px solid #eee;text-align:right">${c.totalRecipients}</td><td style="padding:8px;border-bottom:1px solid #eee;text-align:right">${c.totalRecipients > 0 ? ((c.openCount / c.totalRecipients) * 100).toFixed(1) : 0}%</td><td style="padding:8px;border-bottom:1px solid #eee;text-align:right">${c.totalRecipients > 0 ? ((c.clickCount / c.totalRecipients) * 100).toFixed(1) : 0}%</td></tr>`
+      ).join('');
+      const html = `<h2>Email Marketing Report — ${report.name}</h2><table style="width:100%;border-collapse:collapse;font-family:Arial,sans-serif;font-size:14px"><thead><tr style="background:#f4f4f4"><th style="padding:8px;text-align:left">Campaign</th><th style="padding:8px;text-align:right">Recipients</th><th style="padding:8px;text-align:right">Open Rate</th><th style="padding:8px;text-align:right">Click Rate</th></tr></thead><tbody>${rows || '<tr><td colspan="4" style="padding:16px;text-align:center;color:#999">No campaigns to report</td></tr>'}</tbody></table>`;
+      const domain = await prisma.sendingDomain.findFirst({ where: { tenantId: report.tenantId } });
+      for (const to of report.recipients) {
+        await sendViaSendGrid({ tenantId: report.tenantId, to, fromEmail: `reports@${domain?.domain ?? 'example.com'}`, fromName: 'Email Marketing Reports', subject: `${report.name} — ${now.toLocaleDateString()}`, html }, prisma).catch(() => undefined);
+      }
+      const delayMs = report.frequency === 'daily' ? 86400000 : report.frequency === 'weekly' ? 7 * 86400000 : 30 * 86400000;
+      await prisma.scheduledReport.update({ where: { id: report.id }, data: { lastSentAt: now, nextSendAt: new Date(now.getTime() + delayMs) } });
+    } catch {}
+  }
+  results.reportsSent = dueReports.length;
+
   // Re-enqueue self for next hour
   const cronQueue = new (await import('bullmq')).Queue('system-cron', { connection: connection as never });
   await cronQueue.add('hourly', {}, { delay: 3600000 });
@@ -1025,12 +1197,111 @@ async function processSystemCron(_data: Record<string, unknown>) {
   return { processed: true, ...results };
 }
 
+// ── Email Automation Drip Engine ───────────────────────────────────────
+
+async function processAutomationTick(data: Record<string, unknown>) {
+  const payload = (data.payload && typeof data.payload === 'object') ? data.payload as Record<string, unknown> : data;
+  const executionId = payload.executionId as string | undefined;
+
+  const executions = executionId
+    ? await prisma.automationExecution.findMany({ where: { id: executionId, status: 'active' } })
+    : await prisma.automationExecution.findMany({ where: { status: 'active', nextRunAt: { lte: new Date() } }, take: 50 });
+
+  let processed = 0;
+  for (const exec of executions) {
+    if (!exec.currentStepId) { await prisma.automationExecution.update({ where: { id: exec.id }, data: { status: 'completed', completedAt: new Date() } }); continue; }
+
+    const step = await prisma.automationStep.findUnique({ where: { id: exec.currentStepId } });
+    if (!step) { await prisma.automationExecution.update({ where: { id: exec.id }, data: { status: 'completed', completedAt: new Date() } }); continue; }
+
+    const automation = await prisma.emailAutomation.findUnique({ where: { id: exec.automationId } });
+    if (!automation || automation.status !== 'active') continue;
+
+    try {
+      if (step.type === 'send_email') {
+        const config = step.config as Record<string, unknown>;
+        const subject = (config.subject as string) ?? 'No subject';
+        const body = (config.body as string) ?? '';
+        const fromEmail = (config.fromEmail as string) ?? '';
+        const fromName = (config.fromName as string) ?? '';
+        if (fromEmail && body) {
+          const contact = await prisma.contact.findUnique({ where: { id: exec.contactId } });
+          const mergedBody = body
+            .replace(/\{\{firstName\}\}/g, contact?.firstName ?? '')
+            .replace(/\{\{lastName\}\}/g, contact?.lastName ?? '')
+            .replace(/\{\{email\}\}/g, exec.contactEmail)
+            .replace(/\{\{companyName\}\}/g, fromName);
+          const rendered = await renderEmailWithTracking({
+            store: prisma, body: mergedBody, tenantId: automation.tenantId,
+            campaignId: `automation-${automation.id}`, recipientId: exec.contactId,
+            email: exec.contactEmail, trackOpens: true, trackClicks: true,
+            companyAddress: config.companyAddress as string, subject,
+          });
+          await sendViaSendGrid({
+            tenantId: automation.tenantId, to: exec.contactEmail,
+            fromEmail, fromName, subject, html: rendered?.html ?? mergedBody,
+            text: htmlToPlainText(mergedBody), unsubscribeUrl: rendered?.unsubscribeUrl,
+          }, prisma);
+        }
+      } else if (step.type === 'wait_delay') {
+        const config = step.config as Record<string, unknown>;
+        const delayMs = ((config.days as number) ?? 1) * 86400000 + ((config.hours as number) ?? 0) * 3600000;
+        if (!exec.nextRunAt || exec.nextRunAt.getTime() > Date.now() - delayMs) {
+          await prisma.automationExecution.update({ where: { id: exec.id }, data: { nextRunAt: new Date(Date.now() + delayMs) } });
+          continue;
+        }
+      } else if (step.type === 'add_tag') {
+        const config = step.config as Record<string, unknown>;
+        const tag = config.tag as string;
+        if (tag) {
+          const contact = await prisma.contact.findUnique({ where: { id: exec.contactId } });
+          if (contact && !contact.tags.includes(tag)) {
+            await prisma.contact.update({ where: { id: exec.contactId }, data: { tags: { push: tag } } });
+          }
+        }
+      } else if (step.type === 'remove_tag') {
+        const config = step.config as Record<string, unknown>;
+        const tag = config.tag as string;
+        if (tag) {
+          const contact = await prisma.contact.findUnique({ where: { id: exec.contactId } });
+          if (contact) {
+            await prisma.contact.update({ where: { id: exec.contactId }, data: { tags: { set: contact.tags.filter(t => t !== tag) } } });
+          }
+        }
+      }
+
+      const nextStep = await prisma.automationStep.findFirst({
+        where: { automationId: exec.automationId, stepOrder: { gt: step.stepOrder } },
+        orderBy: { stepOrder: 'asc' },
+      });
+      if (nextStep) {
+        const nextDelay = nextStep.type === 'wait_delay' ? (((nextStep.config as any)?.days ?? 1) * 86400000) : 0;
+        await prisma.automationExecution.update({
+          where: { id: exec.id },
+          data: { currentStepId: nextStep.id, nextRunAt: new Date(Date.now() + nextDelay) },
+        });
+      } else {
+        await prisma.automationExecution.update({ where: { id: exec.id }, data: { status: 'completed', completedAt: new Date(), currentStepId: null } });
+        await prisma.emailAutomation.update({ where: { id: exec.automationId }, data: { completedCount: { increment: 1 } } });
+      }
+      processed++;
+    } catch (error) {
+      await prisma.automationExecution.update({
+        where: { id: exec.id },
+        data: { lastError: error instanceof Error ? error.message : String(error) },
+      });
+    }
+  }
+  return { processed: true, executionsProcessed: processed };
+}
+
 const handlers: Record<string, (data: Record<string, unknown>) => Promise<Record<string, unknown>>> = {
   'email-campaigns': processEmailCampaign,
   'cold-email-sequences': processColdSequenceTick,
   'mailbox-warmup': processMailboxWarmup,
   'domain-purchase-pipeline': processDomainPurchasePipeline,
   'system-cron': processSystemCron,
+  'email-automations': processAutomationTick,
   'notifications': processNotification,
   'dns-checks': processDnsCheck,
 };
@@ -1043,6 +1314,7 @@ const queues = [
   'system-cron',
   'provider-sync',
   'dns-checks',
+  'email-automations',
   'notifications',
   'external-api',
 ];
@@ -1104,86 +1376,3 @@ process.on('SIGINT', async () => {
   await connection.quit();
   process.exit(0);
 });
-
-async function sendViaSendGrid(input: {
-  tenantId: string;
-  campaignId: string;
-  recipientId: string;
-  to: string;
-  fromEmail: string;
-  fromName: string;
-  subject: string;
-  html?: string | null;
-  text?: string | null;
-  replyTo?: string | null;
-}) {
-  const apiKey = process.env.SENDGRID_API_KEY;
-  if (!apiKey) throw new Error('SENDGRID_API_KEY is not configured');
-  const payload = {
-    personalizations: [{
-      to: [{ email: input.to }],
-      custom_args: { tenantId: input.tenantId, campaignId: input.campaignId, recipientId: input.recipientId },
-    }],
-    from: { email: input.fromEmail, name: input.fromName },
-    reply_to: input.replyTo ? { email: input.replyTo } : undefined,
-    subject: input.subject,
-    content: [
-      ...(input.text ? [{ type: 'text/plain', value: input.text }] : []),
-      ...(input.html ? [{ type: 'text/html', value: input.html }] : []),
-    ],
-    tracking_settings: {
-      click_tracking: { enable: true, enable_text: true },
-      open_tracking: { enable: true },
-      subscription_tracking: { enable: false },
-    },
-  };
-  const response = await fetch('https://api.sendgrid.com/v3/mail/send', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  const requestId = response.headers.get('x-message-id') ?? undefined;
-  if (!response.ok) throw new Error(await response.text());
-  await prisma.providerLog.create({
-    data: {
-      tenantId: input.tenantId,
-      provider: 'sendgrid',
-      operation: 'send_email',
-      status: 'success',
-      requestId,
-      request: { to: input.to, campaignId: input.campaignId },
-      response: { status: response.status },
-    },
-  }).catch(() => undefined);
-  return requestId;
-}
-
-async function withTracking(body: string | null, tenantId: string, campaignId: string, recipientId: string, email: string, trackOpens: boolean, trackClicks: boolean) {
-  if (!body) return body;
-  const baseUrl = process.env.API_PUBLIC_URL ?? `http://localhost:${process.env.PORT ?? 3001}/api`;
-  const openToken = randomBytes(24).toString('base64url');
-  await prisma.trackingEvent.create({
-    data: { tenantId, campaignId, recipientId, email, type: 'token', token: openToken },
-  }).catch(() => undefined);
-  const unsubToken = randomBytes(32).toString('base64url');
-  await prisma.unsubscribeToken.create({
-    data: {
-      tenantId,
-      email,
-      campaignId,
-      tokenHash: hash(unsubToken),
-      expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 365),
-    },
-  }).catch(() => undefined);
-  const unsubUrl = `${baseUrl}/email/events/unsubscribe/${unsubToken}`;
-  const linkedBody = trackClicks ? body.replace(/href=(["'])(https?:\/\/[^"']+)\1/gi, (_match, quote: string, url: string) => {
-    const tracked = `${baseUrl}/email/events/click/${openToken}?url=${encodeURIComponent(url)}`;
-    return `href=${quote}${tracked}${quote}`;
-  }) : body;
-  const openPixel = trackOpens ? `<img src="${baseUrl}/email/events/open/${openToken}" alt="" width="1" height="1" style="display:none" />` : '';
-  return `${linkedBody}<div style="text-align:center;margin-top:20px;font-size:12px;color:#999;"><a href="${unsubUrl}" style="color:#999;">Unsubscribe</a></div>${openPixel}`;
-}
-
-function hash(value: string) {
-  return createHash('sha256').update(value).digest('hex');
-}

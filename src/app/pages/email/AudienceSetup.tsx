@@ -286,6 +286,13 @@ function ImportPanel(props: {
         <CardDescription>Upload a CSV or tab-separated file exported from Excel or Google Sheets.</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
+        <button className="text-xs text-blue-600 hover:underline" onClick={async () => {
+          const result = await apiRequest<{ csv: string; filename: string }>('/email/campaigns/audience-csv-template');
+          const blob = new Blob([result.csv], { type: 'text/csv' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a'); a.href = url; a.download = result.filename; a.click();
+          URL.revokeObjectURL(url);
+        }}>Download CSV template with sample data</button>
         <div className="grid md:grid-cols-[260px_1fr] gap-3">
           <div className="space-y-1.5">
             <Label>File</Label>

@@ -52,6 +52,7 @@ enum CampaignStatus {
   draft
   scheduled
   sending
+  paused
   sent
   partial_failed
   cancelled
@@ -62,6 +63,8 @@ enum EmailEventType {
   open
   click
   bounce
+  soft_bounce
+  complaint
   unsubscribe
 }
 
@@ -248,6 +251,11 @@ model Tenant {
   tags            Tag[]
   emailTemplates  EmailTemplate[]
   emailCampaigns  EmailCampaign[]
+  emailAutomations EmailAutomation[]
+  emailSegments   EmailSegment[]
+  subscriptionPreferences SubscriptionPreference[]
+  complianceLogs  ComplianceLog[]
+  scheduledReports ScheduledReport[]
   aiSessions      AiSession[]
   // Cold Email relations
   coldMailboxes          ColdMailbox[]
@@ -438,7 +446,9 @@ model Contact {
   marketingConsentCapturedAt DateTime?
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
-  lastActivityAt DateTime      @default(now())
+  lastActivityAt     DateTime      @default(now())
+  lastEmailSentAt    DateTime?
+  emailSendCount     Int           @default(0)
   tenant         Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   company        Company?      @relation(fields: [companyId], references: [id], onDelete: SetNull)
   activities     Activity[]
@@ -558,6 +568,20 @@ model EmailTemplate {
   @@index([tenantId, createdAt])
 }
 
+model TemplateVersion {
+  id          String   @id @default(uuid())
+  templateId  String
+  version     Int
+  subject     String
+  body        String
+  changedBy   String
+  changeNote  String?
+  createdAt   DateTime @default(now())
+
+  @@index([templateId, version])
+  @@unique([templateId, version])
+}
+
 model EmailCampaign {
   id              String           @id @default(uuid())
   tenantId        String
@@ -598,11 +622,16 @@ model EmailCampaign {
   gdprConsent     Boolean          @default(false)
   doubleOptIn     Boolean          @default(false)
   companyAddress  String?
+  tags            String[]         @default([])
+  starred         Boolean          @default(false)
+  ipPool          String?
+  automationId    String?
   createdBy       String
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @updatedAt
   tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   template        EmailTemplate?   @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  automation      EmailAutomation? @relation(fields: [automationId], references: [id], onDelete: SetNull)
   recipients      CampaignRecipient[]
   events          EmailEvent[]
 
@@ -626,6 +655,7 @@ model CampaignRecipient {
   clickedAt         DateTime?
   bouncedAt         DateTime?
   unsubscribedAt    DateTime?
+  variantId         String?
   lastError         String?
   campaign          EmailCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 
@@ -645,8 +675,105 @@ model EmailEvent {
   campaign    EmailCampaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 
   @@index([campaignId, type])
+  @@index([campaignId, occurredAt])
   @@unique([providerId])
   @@unique([eventKey])
+}
+
+// ── Email Automation & Segments ──
+
+enum AutomationStatus {
+  draft
+  active
+  paused
+  completed
+}
+
+enum AutomationTriggerType {
+  contact_added
+  tag_added
+  form_submitted
+  date_based
+  manual
+}
+
+enum AutomationStepType {
+  send_email
+  wait_delay
+  wait_until
+  condition
+  add_tag
+  remove_tag
+  update_contact
+}
+
+model EmailAutomation {
+  id          String              @id @default(uuid())
+  tenantId    String
+  name        String
+  description String?
+  trigger     AutomationTriggerType @default(manual)
+  triggerConfig Json?
+  status      AutomationStatus    @default(draft)
+  enrolledCount Int               @default(0)
+  completedCount Int              @default(0)
+  createdBy   String
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+  tenant      Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  steps       AutomationStep[]
+  executions  AutomationExecution[]
+  campaigns   EmailCampaign[]
+
+  @@index([tenantId, status])
+}
+
+model AutomationStep {
+  id            String             @id @default(uuid())
+  automationId  String
+  stepOrder     Int
+  type          AutomationStepType
+  name          String?
+  config        Json
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+  automation    EmailAutomation    @relation(fields: [automationId], references: [id], onDelete: Cascade)
+
+  @@index([automationId, stepOrder])
+}
+
+model AutomationExecution {
+  id            String           @id @default(uuid())
+  automationId  String
+  contactId     String
+  contactEmail  String
+  currentStepId String?
+  status        String           @default("active")
+  enrolledAt    DateTime         @default(now())
+  completedAt   DateTime?
+  nextRunAt     DateTime?
+  lastError     String?
+  metadata      Json?
+  automation    EmailAutomation  @relation(fields: [automationId], references: [id], onDelete: Cascade)
+
+  @@index([automationId, status])
+  @@index([status, nextRunAt])
+  @@unique([automationId, contactId])
+}
+
+model EmailSegment {
+  id          String   @id @default(uuid())
+  tenantId    String
+  name        String
+  description String?
+  filterRules Json
+  contactCount Int     @default(0)
+  createdBy   String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
 }
 
 model BillingSubscription {
@@ -1286,6 +1413,54 @@ model UnsubscribeToken {
   @@index([tenantId, email])
 }
 
+model SubscriptionPreference {
+  id          String   @id @default(uuid())
+  tenantId    String
+  email       String
+  category    String
+  subscribed  Boolean  @default(true)
+  updatedAt   DateTime @updatedAt
+  createdAt   DateTime @default(now())
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, email, category])
+  @@index([tenantId, email])
+}
+
+model ComplianceLog {
+  id          String   @id @default(uuid())
+  tenantId    String
+  email       String
+  action      String
+  source      String
+  details     Json?
+  ipAddress   String?
+  userAgent   String?
+  occurredAt  DateTime @default(now())
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, email])
+  @@index([tenantId, occurredAt])
+}
+
+model ScheduledReport {
+  id          String   @id @default(uuid())
+  tenantId    String
+  name        String
+  frequency   String   @default("weekly")
+  recipients  String[]
+  enabled     Boolean  @default(true)
+  lastSentAt  DateTime?
+  nextSendAt  DateTime?
+  createdBy   String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([enabled, nextSendAt])
+}
+
 model TrackingEvent {
   id          String   @id @default(uuid())
   tenantId    String
@@ -1368,6 +1543,7 @@ model SendingDomain {
   blacklistCheckedAt   DateTime?
   purchasedAt          DateTime?
   currentDailyCap      Int             @default(50)
+  sentToday            Int             @default(0)
   lastRestedAt         DateTime?
   lastCheckedAt        DateTime?
   targetDailyVolume    Int?
@@ -1576,19 +1752,23 @@ model ColdEmailEvent {
 // ════════════════════════════════════════════════════════════════════
 
 model EmailProviderCredential {
-  id                String            @id @default(uuid())
-  tenantId          String
-  providerType      EmailProviderType
-  adminEmailCipher  String?
+  id                   String            @id @default(uuid())
+  tenantId             String
+  providerType         EmailProviderType
+  authMethod           String            @default("service_account")
+  adminEmailCipher     String?
   serviceAccountCipher String?
-  msTenantIdCipher  String?
-  clientIdCipher    String?
-  clientSecretCipher String?
-  isActive          Boolean           @default(true)
-  connectedAt       DateTime          @default(now())
-  lastSyncAt        DateTime?
-  createdAt         DateTime          @default(now())
-  updatedAt         DateTime          @updatedAt
+  accessTokenCipher    String?
+  refreshTokenCipher   String?
+  tokenExpiresAt       DateTime?
+  msTenantIdCipher     String?
+  clientIdCipher       String?
+  clientSecretCipher   String?
+  isActive             Boolean           @default(true)
+  connectedAt          DateTime          @default(now())
+  lastSyncAt           DateTime?
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
   tenant            Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   domains           SendingDomain[]
   externalAccounts  ProviderExternalAccount[]

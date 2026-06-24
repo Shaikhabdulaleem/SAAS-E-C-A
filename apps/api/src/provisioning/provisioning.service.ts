@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { google } from 'googleapis';
 import {
   DnsRecordStatus,
   DnsProviderType,
@@ -97,6 +98,14 @@ export class ProvisioningService {
     }
 
     const credential = await this.prisma.emailProviderCredential.create({ data });
+
+    const adminEmail = providerType === EmailProviderType.google_workspace
+      ? this.requiredString(body.adminEmail, 'adminEmail')
+      : null;
+    if (adminEmail) {
+      await this.autoCreateSendingDomain(tenantId, adminEmail, credential.id);
+    }
+
     return this.toProviderResponse(credential);
   }
 
@@ -117,11 +126,121 @@ export class ProvisioningService {
     return { success: true };
   }
 
+  // ── Google OAuth 2.0 ─────────────────────────────────────────────
+
+  private getGoogleOAuth2Client() {
+    return new google.auth.OAuth2(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      process.env.GOOGLE_REDIRECT_URI,
+    );
+  }
+
+  async getGoogleOAuthUrl(tenantId: string) {
+    const existing = await this.prisma.emailProviderCredential.findUnique({
+      where: { tenantId_providerType: { tenantId, providerType: EmailProviderType.google_workspace } },
+    });
+    if (existing) throw new BadRequestException('Google Workspace is already connected. Disconnect first.');
+
+    const client = this.getGoogleOAuth2Client();
+    const url = client.generateAuthUrl({
+      access_type: 'offline',
+      prompt: 'consent',
+      scope: [
+        'https://www.googleapis.com/auth/admin.directory.user',
+        'https://www.googleapis.com/auth/gmail.send',
+        'https://www.googleapis.com/auth/gmail.readonly',
+        'https://www.googleapis.com/auth/userinfo.email',
+      ],
+      state: Buffer.from(JSON.stringify({ tenantId })).toString('base64'),
+    });
+    return { url };
+  }
+
+  async handleGoogleOAuthCallback(code: string, state: string) {
+    if (!code || !state) throw new BadRequestException('Missing code or state');
+
+    let tenantId: string;
+    try {
+      const parsed = JSON.parse(Buffer.from(state, 'base64').toString());
+      tenantId = parsed.tenantId;
+    } catch {
+      throw new BadRequestException('Invalid state parameter');
+    }
+
+    const client = this.getGoogleOAuth2Client();
+    const { tokens } = await client.getToken(code);
+    if (!tokens.access_token || !tokens.refresh_token) {
+      throw new BadRequestException('Failed to obtain tokens from Google');
+    }
+
+    client.setCredentials(tokens);
+    const oauth2 = google.oauth2({ version: 'v2', auth: client });
+    const userInfo = await oauth2.userinfo.get();
+    const adminEmail = userInfo.data.email;
+
+    const existing = await this.prisma.emailProviderCredential.findUnique({
+      where: { tenantId_providerType: { tenantId, providerType: EmailProviderType.google_workspace } },
+    });
+    if (existing) {
+      await this.prisma.emailProviderCredential.update({
+        where: { id: existing.id },
+        data: {
+          authMethod: 'oauth',
+          adminEmailCipher: adminEmail ? this.encryption.encrypt(adminEmail) : null,
+          accessTokenCipher: this.encryption.encrypt(tokens.access_token),
+          refreshTokenCipher: this.encryption.encrypt(tokens.refresh_token),
+          tokenExpiresAt: tokens.expiry_date ? new Date(tokens.expiry_date) : null,
+          serviceAccountCipher: null,
+        },
+      });
+      return;
+    }
+
+    const credential = await this.prisma.emailProviderCredential.create({
+      data: {
+        tenantId,
+        providerType: EmailProviderType.google_workspace,
+        authMethod: 'oauth',
+        adminEmailCipher: adminEmail ? this.encryption.encrypt(adminEmail) : null,
+        accessTokenCipher: this.encryption.encrypt(tokens.access_token),
+        refreshTokenCipher: this.encryption.encrypt(tokens.refresh_token),
+        tokenExpiresAt: tokens.expiry_date ? new Date(tokens.expiry_date) : null,
+      },
+    });
+
+    if (adminEmail) {
+      await this.autoCreateSendingDomain(tenantId, adminEmail, credential.id);
+    }
+  }
+
+  private async autoCreateSendingDomain(tenantId: string, email: string, credentialId: string) {
+    const domain = email.split('@')[1]?.toLowerCase();
+    if (!domain) return;
+    const existing = await this.prisma.sendingDomain.findFirst({
+      where: { tenantId, domain },
+    });
+    if (existing) return;
+    await this.prisma.sendingDomain.create({
+      data: {
+        tenantId,
+        domain,
+        providerCredentialId: credentialId,
+        trackingDomain: `track.${domain}`,
+        trackingCnameValue: 'sendgrid.net',
+        dkimSelector: 'default',
+        dkimHost: `default._domainkey.${domain}`,
+        dkimValue: '',
+      },
+    });
+  }
+
   private toProviderResponse(credential: Record<string, unknown>) {
     const c = credential as {
       id: string;
       tenantId: string;
       providerType: string;
+      authMethod?: string;
       adminEmailCipher?: string | null;
       serviceAccountCipher?: string | null;
       msTenantIdCipher?: string | null;
@@ -134,6 +253,7 @@ export class ProvisioningService {
     return {
       id: c.id,
       providerType: c.providerType,
+      authMethod: c.authMethod ?? 'service_account',
       isActive: c.isActive,
       connectedAt: c.connectedAt,
       lastSyncAt: c.lastSyncAt,
@@ -736,6 +856,12 @@ export class ProvisioningService {
     if (domains.length === 0) throw new BadRequestException('At least one domain is required');
     if (targetDailyVolume < 1) throw new BadRequestException('targetDailyVolume must be at least 1');
 
+    // Find a connected provider to create real mailboxes when available
+    const providerCredential = await this.prisma.emailProviderCredential.findFirst({
+      where: { tenantId, isActive: true },
+    });
+    const useRealProvider = !!providerCredential;
+
     const emailsPerMailbox = 50;
     const mailboxesPerDomain = Math.ceil(targetDailyVolume / emailsPerMailbox / domains.length);
     const totalMailboxes = mailboxesPerDomain * domains.length;
@@ -753,10 +879,10 @@ export class ProvisioningService {
     let nameIndex = 0;
 
     for (const domainName of domains) {
-      const d = this.requiredString(domainName, 'domain');
+      const d = this.requiredString(domainName, 'domain').toLowerCase().trim();
 
       let sendingDomain = await this.prisma.sendingDomain.findFirst({
-        where: { tenantId, domain: d },
+        where: { tenantId, domain: { equals: d, mode: 'insensitive' as any } },
       });
 
       if (!sendingDomain) {
@@ -766,6 +892,7 @@ export class ProvisioningService {
             domain: d,
             targetDailyVolume: Math.ceil(targetDailyVolume / domains.length),
             requiredMailboxes: mailboxesPerDomain,
+            providerCredentialId: providerCredential?.id,
           },
         });
       } else {
@@ -774,6 +901,7 @@ export class ProvisioningService {
           data: {
             targetDailyVolume: Math.ceil(targetDailyVolume / domains.length),
             requiredMailboxes: mailboxesPerDomain,
+            providerCredentialId: sendingDomain.providerCredentialId ?? providerCredential?.id,
           },
         });
       }
@@ -787,11 +915,34 @@ export class ProvisioningService {
         const email = this.formatEmail(firstName, lastName, d, emailFormat);
         nameIndex++;
 
+        // Attempt real provider mailbox creation when a provider is connected
+        let realProviderUsed = false;
+        if (useRealProvider && providerCredential) {
+          try {
+            const providerType = providerCredential.providerType;
+            const provisioned = providerType === EmailProviderType.google_workspace
+              ? await this.createGoogleWorkspaceMailbox(tenantId, providerCredential, email, firstName, lastName)
+              : await this.createMicrosoft365Mailbox(tenantId, providerCredential, email, firstName, lastName);
+            realProviderUsed = true;
+
+            await this.prisma.mailboxProvisioningLog.create({
+              data: { tenantId, domainId: sendingDomain!.id, provider: providerType, email, status: 'succeeded', externalId: provisioned.externalId, lastSyncAt: new Date() },
+            });
+          } catch {
+            // Provider API failed — fall back to custom_smtp record
+            realProviderUsed = false;
+          }
+        }
+
+        const mailboxProvider = realProviderUsed && providerCredential
+          ? (providerCredential.providerType === EmailProviderType.google_workspace ? MailboxProvider.gmail : MailboxProvider.outlook)
+          : MailboxProvider.custom_smtp;
+
         const persona = await this.prisma.$transaction(async (tx) => {
           const mailbox = await tx.coldMailbox.create({
             data: {
               tenantId,
-              provider: MailboxProvider.custom_smtp,
+              provider: mailboxProvider,
               email,
               fromName: `${firstName} ${lastName}`,
               dailySendLimit: 5,
@@ -1431,7 +1582,12 @@ export class ProvisioningService {
       },
     });
 
-    await this.jobs.enqueue(tenantId, 'domain-purchase-pipeline', 'check_availability', { orderId: order.id, phase: 'check_availability' });
+    await this.jobs.enqueue({
+      tenantId,
+      queue: 'domain-purchase-pipeline',
+      name: 'check_availability',
+      payload: { orderId: order.id, phase: 'check_availability' },
+    });
     return order;
   }
 
@@ -1467,7 +1623,12 @@ export class ProvisioningService {
       data: { domains: domains as any, totalCost, status: 'purchasing' },
     });
 
-    await this.jobs.enqueue(tenantId, 'domain-purchase-pipeline', 'purchase_domains', { orderId, phase: 'purchase_domains' });
+    await this.jobs.enqueue({
+      tenantId,
+      queue: 'domain-purchase-pipeline',
+      name: 'purchase_domains',
+      payload: { orderId, phase: 'purchase_domains' },
+    });
     return this.getDomainPurchaseOrder(tenantId, orderId);
   }
 
@@ -1493,7 +1654,12 @@ export class ProvisioningService {
       data: { domains: domains as any, status: phase === 'purchase_domains' ? 'purchasing' : 'configuring_dns', lastError: null },
     });
 
-    await this.jobs.enqueue(tenantId, 'domain-purchase-pipeline', phase, { orderId, phase });
+    await this.jobs.enqueue({
+      tenantId,
+      queue: 'domain-purchase-pipeline',
+      name: phase,
+      payload: { orderId, phase },
+    });
     return this.getDomainPurchaseOrder(tenantId, orderId);
   }
 }

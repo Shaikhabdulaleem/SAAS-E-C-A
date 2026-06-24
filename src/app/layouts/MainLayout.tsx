@@ -36,6 +36,7 @@ import {
   Activity,
   Zap,
   ToggleLeft,
+  BarChart2,
 } from 'lucide-react';
 import { useState, type ComponentType } from 'react';
 import { Badge } from '../components/ui/badge';
@@ -108,6 +109,8 @@ function buildNavGroups(user: User | null, activeServices: string[] = [], isImpe
         { name: 'Domain Setup', href: '/domain-setup', icon: Globe },
         { name: 'Templates', href: '/templates', icon: FileText },
         { name: 'Suppressions', href: '/suppressions', icon: Ban },
+        { name: 'Automations', href: '/automations', icon: Zap },
+        { name: 'Analytics', href: '/email-analytics', icon: BarChart2 },
       ],
     });
   }
@@ -116,21 +119,12 @@ function buildNavGroups(user: User | null, activeServices: string[] = [], isImpe
     groups.push({
       label: 'Cold Outreach',
       items: [
-        { name: 'Sequences', href: '/cold-email/campaigns', icon: Crosshair },
+        { name: 'Setup Wizard', href: '/cold-email/setup', icon: Wand2 },
+        { name: 'Campaigns', href: '/cold-email/campaigns', icon: Crosshair },
+        { name: 'Prospects', href: '/cold-email/prospects', icon: UserSearch },
         { name: 'Mailboxes', href: '/cold-email/mailboxes', icon: Inbox },
-        { name: 'Prospect Lists', href: '/cold-email/prospects', icon: UserSearch },
         { name: 'Domains', href: '/cold-email/domains', icon: Globe },
-        { name: 'Provider', href: '/cold-email/provider-connect', icon: Link2 },
-        { name: 'Domain Mgmt', href: '/cold-email/domain-manager', icon: Layers },
-        { name: 'Buy Domains', href: '/cold-email/domain-purchase', icon: ShoppingCart },
-        { name: 'Auto-Provision', href: '/cold-email/provision', icon: Wand2 },
-        { name: 'Personas', href: '/cold-email/personas', icon: UserCircle },
-        { name: 'Domain Health', href: '/cold-email/domain-health', icon: HeartPulse },
         { name: 'Warmup', href: '/cold-email/warmup', icon: Flame },
-        { name: 'Email Finder', href: '/cold-email/email-finder', icon: Search },
-        { name: 'Reply Inbox', href: '/cold-email/replies', icon: Mail },
-        { name: 'Suppressions', href: '/cold-email/suppressions', icon: Ban },
-        { name: 'Deliverability', href: '/cold-email/deliverability', icon: Shield },
       ],
     });
   }
@@ -347,6 +341,7 @@ export function MainLayout() {
     if (path.startsWith('/domain-setup')) return 'Domain Setup';
     if (path.startsWith('/templates')) return 'Templates';
     if (path.startsWith('/suppressions')) return 'Suppression List';
+    if (path.startsWith('/cold-email/setup')) return 'Cold Email Setup';
     if (path.startsWith('/cold-email/provider-connect')) return 'Connect Email Provider';
     if (path.startsWith('/cold-email/domain-manager')) return 'Domain Management';
     if (path.startsWith('/cold-email/provision')) return 'Auto-Provision';

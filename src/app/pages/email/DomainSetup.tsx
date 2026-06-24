@@ -216,6 +216,19 @@ export function DomainSetup() {
                   ))}
                 </div>
                 <DnsRecordsTable records={domain.dnsRecords ?? []} />
+                <div className="flex items-center gap-4 p-3 bg-gray-50 rounded-lg text-sm">
+                  <span className="text-gray-600">Daily Send Cap:</span>
+                  <span className="font-medium">{(domain as any).currentDailyCap ?? 50}/day</span>
+                  <span className="text-gray-400">|</span>
+                  <span className="text-gray-600">Sent Today:</span>
+                  <span className="font-medium">{(domain as any).sentToday ?? 0}</span>
+                  <button className="ml-auto text-xs text-blue-600 hover:underline" onClick={async () => {
+                    const newCap = prompt('Enter new daily send cap:', String((domain as any).currentDailyCap ?? 50));
+                    if (!newCap) return;
+                    await apiRequest(`/email/domains/${domain.id}/limit`, { method: 'PATCH', body: JSON.stringify({ dailyCap: parseInt(newCap) }) });
+                    load();
+                  }}>Edit Limit</button>
+                </div>
               </CardContent>
             </Card>
           ))}
