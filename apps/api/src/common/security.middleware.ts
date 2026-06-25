@@ -1,5 +1,6 @@
 import { randomBytes, timingSafeEqual } from 'crypto';
 import { NextFunction, Request, Response } from 'express';
+import { logger } from './logger';
 
 export function helmetMiddleware(request: Request, response: Response, next: NextFunction) {
   response.setHeader('X-Content-Type-Options', 'nosniff');
@@ -17,15 +18,32 @@ type Bucket = {
   resetAt: number;
 };
 
-const buckets = new Map<string, Bucket>();
+const localBuckets = new Map<string, Bucket>();
 const windowMs = Number(process.env.RATE_LIMIT_WINDOW_MS ?? 60_000);
 const defaultLimit = Number(process.env.RATE_LIMIT_MAX ?? 600);
 const authLimit = Number(process.env.AUTH_RATE_LIMIT_MAX ?? 10);
 const aiLimit = Number(process.env.AI_RATE_LIMIT_MAX ?? 60);
 
+let redisClient: { incr: (key: string) => Promise<number>; pexpire: (key: string, ms: number) => Promise<number>; pttl: (key: string) => Promise<number> } | null = null;
+
+async function initRedisRateLimiter() {
+  const redisUrl = process.env.REDIS_URL;
+  if (!redisUrl || redisClient) return;
+  try {
+    const IORedis = (await import('ioredis')).default;
+    redisClient = new IORedis(redisUrl, { maxRetriesPerRequest: 1, connectTimeout: 2000, lazyConnect: true }) as never;
+    await (redisClient as unknown as { connect: () => Promise<void> }).connect();
+    logger.info('Rate limiter using Redis');
+  } catch {
+    redisClient = null;
+    logger.warn('Rate limiter falling back to in-memory (Redis unavailable)');
+  }
+}
+void initRedisRateLimiter();
+
 function keyFor(request: Request) {
   const userKey = request.headers.authorization ?? request.headers['x-tenant-id'] ?? '';
-  return `${request.ip}:${userKey}:${request.method}:${request.path}`;
+  return `rl:${request.ip}:${userKey}:${request.method}:${request.path}`;
 }
 
 function limitFor(request: Request) {
@@ -34,14 +52,38 @@ function limitFor(request: Request) {
   return defaultLimit;
 }
 
-export function rateLimitMiddleware(request: Request, response: Response, next: NextFunction) {
+async function redisRateLimit(key: string, limit: number, response: Response): Promise<boolean> {
+  if (!redisClient) return false;
+  try {
+    const count = await redisClient.incr(key);
+    if (count === 1) await redisClient.pexpire(key, windowMs);
+    const ttl = await redisClient.pttl(key);
+    const resetAt = Math.ceil((Date.now() + Math.max(ttl, 0)) / 1000);
+
+    response.setHeader('X-RateLimit-Limit', String(limit));
+    response.setHeader('X-RateLimit-Remaining', String(Math.max(limit - count, 0)));
+    response.setHeader('X-RateLimit-Reset', String(resetAt));
+
+    if (count > limit) {
+      response.status(429).json({
+        data: null,
+        meta: {},
+        error: { code: 'RATE_LIMITED', message: 'Too many requests. Please try again shortly.' },
+      });
+      return true;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function localRateLimit(key: string, limit: number, response: Response): boolean {
   const now = Date.now();
-  const key = keyFor(request);
-  const limit = limitFor(request);
-  const current = buckets.get(key);
+  const current = localBuckets.get(key);
   const bucket = current && current.resetAt > now ? current : { count: 0, resetAt: now + windowMs };
   bucket.count += 1;
-  buckets.set(key, bucket);
+  localBuckets.set(key, bucket);
 
   response.setHeader('X-RateLimit-Limit', String(limit));
   response.setHeader('X-RateLimit-Remaining', String(Math.max(limit - bucket.count, 0)));
@@ -53,13 +95,27 @@ export function rateLimitMiddleware(request: Request, response: Response, next: 
       meta: {},
       error: { code: 'RATE_LIMITED', message: 'Too many requests. Please try again shortly.' },
     });
-    return;
+    return true;
   }
 
-  if (buckets.size > 10_000) {
-    for (const [bucketKey, value] of buckets.entries()) {
-      if (value.resetAt <= now) buckets.delete(bucketKey);
+  if (localBuckets.size > 10_000) {
+    for (const [bucketKey, value] of localBuckets.entries()) {
+      if (value.resetAt <= now) localBuckets.delete(bucketKey);
     }
+  }
+  return false;
+}
+
+export async function rateLimitMiddleware(request: Request, response: Response, next: NextFunction) {
+  const key = keyFor(request);
+  const limit = limitFor(request);
+
+  const handled = await redisRateLimit(key, limit, response);
+  if (!handled) {
+    const blocked = localRateLimit(key, limit, response);
+    if (blocked) return;
+  } else if (response.headersSent) {
+    return;
   }
 
   next();
@@ -104,7 +160,7 @@ export function requestLoggingMiddleware(request: Request, response: Response, n
   response.on('finish', () => {
     const durationMs = Date.now() - startedAt;
     const tenantId = request.headers['x-tenant-id'] ?? '-';
-    console.info(`${request.method} ${request.originalUrl} ${response.statusCode} ${durationMs}ms tenant=${tenantId}`);
+    logger.info('request', { method: request.method, url: request.originalUrl, status: response.statusCode, durationMs, tenantId: tenantId as string });
   });
   next();
 }

@@ -159,7 +159,7 @@ export class ProvisioningController {
     if (!file) throw new BadRequestException('Photo file is required');
     const tid = tenantId(user, selectedTenantId);
     const existing = await this.provisioning.getPersona(tid, id);
-    const profilePhoto = saveUploadedFile(file, 'profile-photos');
+    const profilePhoto = await saveUploadedFile(file, 'profile-photos');
     if (existing?.profilePhoto) deleteUploadedFile(existing.profilePhoto);
     return this.provisioning.updatePersona(tid, id, { profilePhoto });
   }

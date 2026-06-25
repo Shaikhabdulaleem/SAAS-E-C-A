@@ -24,7 +24,7 @@ export class AdminSettingsController {
   async uploadLogo(@UploadedFile() file: Express.Multer.File) {
     if (!file) throw new BadRequestException('Logo file is required');
     const existing = await this.settings.getSettings();
-    const logoUrl = saveUploadedFile(file, 'logos');
+    const logoUrl = await saveUploadedFile(file, 'logos');
     if (existing?.logoUrl) deleteUploadedFile(existing.logoUrl);
     return this.settings.updateSettings({ logoUrl });
   }

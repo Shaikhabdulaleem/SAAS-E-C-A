@@ -47,9 +47,9 @@ export class CallsController {
 
   @Post('sessions/:id/recordings')
   @UseInterceptors(FileInterceptor('recording', recordingUploadOptions()))
-  addRecording(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @UploadedFile() file: Express.Multer.File, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
+  async addRecording(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @UploadedFile() file: Express.Multer.File, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
     if (!file) throw new BadRequestException('Recording file is required');
-    const storageUrl = saveUploadedFile(file, 'recordings');
+    const storageUrl = await saveUploadedFile(file, 'recordings');
     return this.calls.addRecording(resolveTenantId(user, selectedTenantId), id, { ...body, storageUrl, mimeType: file.mimetype });
   }
 

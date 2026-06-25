@@ -35,7 +35,7 @@ export class ClientSettingsController {
     if (!file) throw new BadRequestException('Logo file is required');
     const tid = resolveTenantId(user, selectedTenantId, adminImpersonation);
     const existing = await this.settings.getBrandSettings(tid);
-    const logoUrl = saveUploadedFile(file, 'logos');
+    const logoUrl = await saveUploadedFile(file, 'logos');
     if (existing?.logoUrl) deleteUploadedFile(existing.logoUrl);
     return this.settings.updateBrandSettings(tid, { logoUrl });
   }

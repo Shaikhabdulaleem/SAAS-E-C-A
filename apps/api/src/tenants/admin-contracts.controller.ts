@@ -38,7 +38,7 @@ export class AdminContractsController {
   async uploadDocument(@Param('id') id: string, @UploadedFile() file: Express.Multer.File, @CurrentUser() user: AuthenticatedUser) {
     if (!file) throw new BadRequestException('Document file is required');
     const existing = await this.contracts.getById(id);
-    const documentUrl = saveUploadedFile(file, 'contracts');
+    const documentUrl = await saveUploadedFile(file, 'contracts');
     if (existing?.documentUrl) deleteUploadedFile(existing.documentUrl);
     return this.contracts.update(id, { documentUrl }, user.id);
   }

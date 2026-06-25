@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { MulterOptions } from '@nestjs/platform-express/multer/interfaces/multer-options.interface';
+import { logger } from './logger';
 
 const UPLOADS_ROOT = path.resolve(process.cwd(), '..', '..', 'uploads');
 
@@ -11,9 +12,44 @@ function ensureDir(category: string): string {
   return dir;
 }
 
-export function saveUploadedFile(file: Express.Multer.File, category: string): string {
+async function uploadToS3(buffer: Buffer, key: string, contentType: string): Promise<string> {
+  const bucket = process.env.S3_UPLOAD_BUCKET;
+  const region = process.env.AWS_REGION ?? 'us-east-1';
+  const endpoint = process.env.S3_ENDPOINT;
+
+  if (!bucket) throw new Error('S3_UPLOAD_BUCKET not configured');
+
+  const baseUrl = endpoint ?? `https://s3.${region}.amazonaws.com`;
+  const url = `${baseUrl}/${bucket}/${key}`;
+
+  const response = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': contentType,
+      'Content-Length': String(buffer.length),
+    },
+    body: buffer as unknown as BodyInit,
+  });
+
+  if (!response.ok) throw new Error(`S3 upload failed: ${response.status}`);
+  return `https://${bucket}.s3.${region}.amazonaws.com/${key}`;
+}
+
+export async function saveUploadedFile(file: Express.Multer.File, category: string): Promise<string> {
   const ext = path.extname(file.originalname).toLowerCase() || '.bin';
   const filename = `${randomUUID()}${ext}`;
+
+  if (process.env.S3_UPLOAD_BUCKET) {
+    try {
+      const key = `${category}/${filename}`;
+      const publicUrl = await uploadToS3(file.buffer, key, file.mimetype);
+      logger.info('file_uploaded_s3', { key, size: file.size });
+      return publicUrl;
+    } catch (error) {
+      logger.error('s3_upload_failed', { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
   const dir = ensureDir(category);
   fs.writeFileSync(path.join(dir, filename), file.buffer);
   return `/uploads/${category}/${filename}`;
