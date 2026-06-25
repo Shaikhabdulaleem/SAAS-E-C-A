@@ -25,7 +25,7 @@
     "chokidar": "^3.6.0",
     "googleapis": "^173.0.0",
     "ioredis": "^5.11.1",
-    "picomatch": "^2.3.1",
+    "picomatch": "^4.0.4",
     "puppeteer": "^25.1.0",
     "readdirp": "^3.6.0",
     "reflect-metadata": "0.2.2",
