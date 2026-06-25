@@ -22,11 +22,11 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
 
-      - name: Install root dependencies
-        run: npm ci --ignore-scripts
+      - name: Install all dependencies
+        run: npm install
 
       - name: Install API dependencies
-        run: cd apps/api && npm ci --ignore-scripts
+        run: cd apps/api && npm install
 
       - name: Generate Prisma client
         run: cd apps/api && npx prisma generate
@@ -35,6 +35,8 @@ jobs:
         run: cd apps/api && npx tsc --noEmit
 
       - name: Build frontend
+        env:
+          VITE_API_URL: http://localhost:3001/api
         run: npx vite build
 
   # ── API Tests ──────────────────────────────────────────
@@ -81,7 +83,7 @@ jobs:
           cache: npm
 
       - name: Install API dependencies
-        run: cd apps/api && npm ci --ignore-scripts
+        run: cd apps/api && npm install
 
       - name: Generate Prisma client
         run: cd apps/api && npx prisma generate
