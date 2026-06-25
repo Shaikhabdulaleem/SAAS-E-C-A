@@ -7,6 +7,7 @@ import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
 import { Switch } from '../../components/ui/switch';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select';
+import { FileUploadField } from '../../components/ui/file-upload-field';
 
 interface MccSettingsData {
   companyName: string;
@@ -204,12 +205,26 @@ export function MccSettings() {
               </div>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="logoUrl">Logo URL</Label>
-              <Input
-                id="logoUrl"
-                value={settings.logoUrl}
-                onChange={(e) => update('logoUrl', e.target.value)}
-                placeholder="https://example.com/logo.png"
+              <Label>Logo</Label>
+              <FileUploadField
+                currentUrl={settings.logoUrl}
+                accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
+                label="Upload logo"
+                onChange={async (file) => {
+                  if (file) {
+                    const fd = new FormData();
+                    fd.append('logo', file);
+                    try {
+                      const result = await apiRequest<MccSettingsData>('/admin/settings/logo', { method: 'POST', body: fd });
+                      setSettings(prev => ({ ...prev, logoUrl: result.logoUrl }));
+                    } catch {}
+                  } else {
+                    try {
+                      const result = await apiRequest<MccSettingsData>('/admin/settings/logo', { method: 'DELETE' });
+                      setSettings(prev => ({ ...prev, logoUrl: result.logoUrl ?? '' }));
+                    } catch {}
+                  }
+                }}
               />
             </div>
           </div>

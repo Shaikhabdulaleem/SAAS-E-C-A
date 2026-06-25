@@ -52,7 +52,7 @@ export class DomainRegistrarService {
     const integrations = await this.prisma.tenantIntegration.findMany({
       where: { tenantId, platformKey: { in: SUPPORTED_REGISTRARS }, isActive: true },
     });
-    return integrations.map((i) => ({ provider: i.platformKey, connectedAt: i.createdAt }));
+    return integrations.map((i) => ({ provider: i.platformKey, connectedAt: i.addedAt }));
   }
 
   // ── Unified Interface ─────────────────────────────────────────────

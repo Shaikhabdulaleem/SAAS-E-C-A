@@ -11,6 +11,7 @@ import { Switch } from '../../components/ui/switch';
 import { Tabs, TabsList, TabsTrigger } from '../../components/ui/tabs';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '../../components/ui/dropdown-menu';
 import { apiRequest } from '../../lib/api';
+import { FileUploadField } from '../../components/ui/file-upload-field';
 
 interface Persona {
   id: string;
@@ -78,7 +79,8 @@ function getDomainColorIndex(domain: string) {
   return Math.abs(hash) % domainColors.length;
 }
 
-function getInitials(name: string) {
+function getInitials(name?: string | null) {
+  if (!name) return '??';
   return name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
 }
 
@@ -104,14 +106,21 @@ export function Personas() {
   const [editForm, setEditForm] = useState({ jobTitle: '', companyName: '', phone: '', signature: '', profilePhotoUrl: '' });
   const [linkedinForm, setLinkedinForm] = useState({ profileUrl: '', headline: '', bio: '', connected: false });
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => { fetchPersonas(); }, []);
 
   const fetchPersonas = async () => {
     try {
-      const data = await apiRequest<Persona[]>('/provisioning/personas');
-      setPersonas(data);
-    } catch {
+      setError(null);
+      const data = await apiRequest<any[]>('/provisioning/personas');
+      setPersonas((Array.isArray(data) ? data : []).map(p => ({
+        ...p,
+        domain: typeof p.domain === 'object' && p.domain ? p.domain.domain : (p.domain ?? ''),
+        fullName: p.fullName ?? p.email ?? '',
+      })));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load personas');
     } finally {
       setLoading(false);
     }
@@ -148,7 +157,8 @@ export function Personas() {
       });
       setPersonas(prev => prev.map(p => p.id === editModal.id ? updated : p));
       setEditModal(null);
-    } catch {
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save persona');
     } finally {
       setSaving(false);
     }
@@ -164,7 +174,8 @@ export function Personas() {
       });
       setPersonas(prev => prev.map(p => p.id === linkedinModal.id ? updated : p));
       setLinkedinModal(null);
-    } catch {
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save LinkedIn settings');
     } finally {
       setSaving(false);
     }
@@ -175,7 +186,8 @@ export function Personas() {
     try {
       await apiRequest(`/provisioning/personas/${id}`, { method: 'DELETE' });
       setPersonas(prev => prev.filter(p => p.id !== id));
-    } catch {
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete persona');
     }
   };
 
@@ -236,8 +248,30 @@ export function Personas() {
                 />
               </div>
               <div className="space-y-1.5">
-                <Label className="text-sm">Profile Photo URL</Label>
-                <Input value={editForm.profilePhotoUrl} onChange={e => setEditForm(f => ({ ...f, profilePhotoUrl: e.target.value }))} placeholder="https://..." />
+                <Label className="text-sm">Profile Photo</Label>
+                <FileUploadField
+                  currentUrl={editForm.profilePhotoUrl}
+                  accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
+                  label="Upload photo"
+                  onChange={async (file) => {
+                    if (!editModal) return;
+                    if (file) {
+                      const fd = new FormData();
+                      fd.append('photo', file);
+                      try {
+                        const updated = await apiRequest<Persona>(`/provisioning/personas/${editModal.id}/photo`, { method: 'POST', body: fd });
+                        setEditForm(f => ({ ...f, profilePhotoUrl: updated.profilePhoto || '' }));
+                        setPersonas(prev => prev.map(p => p.id === editModal.id ? updated : p));
+                      } catch (err) { setError(err instanceof Error ? err.message : 'Upload failed'); }
+                    } else {
+                      try {
+                        const updated = await apiRequest<Persona>(`/provisioning/personas/${editModal.id}/photo`, { method: 'DELETE' });
+                        setEditForm(f => ({ ...f, profilePhotoUrl: '' }));
+                        setPersonas(prev => prev.map(p => p.id === editModal.id ? updated : p));
+                      } catch (err) { setError(err instanceof Error ? err.message : 'Remove failed'); }
+                    }
+                  }}
+                />
               </div>
               <div className="flex items-center justify-end gap-3 pt-2 border-t border-border">
                 <Button variant="outline" size="sm" onClick={() => setEditModal(null)}>Cancel</Button>

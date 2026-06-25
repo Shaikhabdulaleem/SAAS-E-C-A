@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { ContactSource, ContactStatus, DealStatus, Prisma } from '@prisma/client';
 import { google } from 'googleapis';
 import { PrismaService } from '../prisma/prisma.service';
+import { CrmAutomationService } from './crm-automation.service';
 
 type ImportMapping = {
   firstName?: string;
@@ -43,7 +44,10 @@ type NormalizedImportRow = {
 
 @Injectable()
 export class CrmService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly automation: CrmAutomationService,
+  ) {}
 
   listContacts(tenantId: string, query: Record<string, string>) {
     const where: Prisma.ContactWhereInput = {
@@ -74,6 +78,7 @@ export class CrmService {
           assignedTo: this.optionalString(body.assignedTo),
           status: this.optionalEnum(body.status, Object.values(ContactStatus), ContactStatus.lead),
           source: this.optionalEnum(body.source, Object.values(ContactSource), ContactSource.manual),
+          interestedServices: this.stringArray(body.interestedServices),
           tags: this.stringArray(body.tags),
           marketingConsent: this.optionalBoolean(body.marketingConsent, false),
           marketingConsentSource: this.optionalString(body.marketingConsentSource),
@@ -92,10 +97,77 @@ export class CrmService {
     return contact;
   }
 
+  async getContactEngagement(tenantId: string, id: string) {
+    const contact = await this.getContact(tenantId, id);
+
+    const [emailCampaigns, coldProspects] = await Promise.all([
+      this.prisma.campaignRecipient.findMany({
+        where: { OR: [{ contactId: id }, { email: contact.email }] },
+        include: {
+          campaign: { select: { id: true, name: true, status: true, sentAt: true } },
+        },
+        orderBy: { sentAt: 'desc' },
+      }),
+      this.prisma.coldProspect.findMany({
+        where: { OR: [{ contactId: id }, { email: contact.email }] },
+        include: {
+          list: { select: { id: true, name: true } },
+          sequenceStates: {
+            include: { campaign: { select: { id: true, name: true, status: true } } },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+    ]);
+
+    const emailStats = {
+      totalCampaigns: new Set(emailCampaigns.map(r => r.campaignId)).size,
+      sent: emailCampaigns.filter(r => r.sentAt).length,
+      opened: emailCampaigns.filter(r => r.openedAt).length,
+      clicked: emailCampaigns.filter(r => r.clickedAt).length,
+      bounced: emailCampaigns.filter(r => r.bouncedAt).length,
+    };
+
+    const coldStats = {
+      totalLists: new Set(coldProspects.map(p => p.listId)).size,
+      totalCampaigns: new Set(coldProspects.flatMap(p => p.sequenceStates.map(s => s.campaignId))).size,
+    };
+
+    return {
+      emailCampaigns: emailCampaigns.map(r => ({
+        recipientId: r.id,
+        campaignId: r.campaign.id,
+        campaignName: r.campaign.name,
+        campaignStatus: r.campaign.status,
+        sentAt: r.sentAt,
+        openedAt: r.openedAt,
+        clickedAt: r.clickedAt,
+        bouncedAt: r.bouncedAt,
+        recipientStatus: r.status,
+      })),
+      coldOutreach: coldProspects.map(p => ({
+        prospectId: p.id,
+        listId: p.list.id,
+        listName: p.list.name,
+        validationStatus: p.validationStatus,
+        campaigns: p.sequenceStates.map(s => ({
+          campaignId: s.campaign.id,
+          campaignName: s.campaign.name,
+          campaignStatus: s.campaign.status,
+          status: s.status,
+          lastSentAt: s.lastSentAt,
+          completedAt: s.completedAt,
+        })),
+      })),
+      emailStats,
+      coldStats,
+    };
+  }
+
   async updateContact(tenantId: string, actorUserId: string, id: string, body: Record<string, unknown>) {
-    await this.getContact(tenantId, id);
-    return this.prisma.$transaction(async (tx) => {
-      const contact = await tx.contact.update({
+    const previous = await this.getContact(tenantId, id);
+    const contact = await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.contact.update({
         where: { id },
         data: {
           firstName: this.optionalString(body.firstName),
@@ -107,6 +179,7 @@ export class CrmService {
           assignedTo: this.optionalString(body.assignedTo),
           status: this.optionalEnum(body.status, Object.values(ContactStatus)),
           source: this.optionalEnum(body.source, Object.values(ContactSource)),
+          interestedServices: Array.isArray(body.interestedServices) ? this.stringArray(body.interestedServices) : undefined,
           tags: Array.isArray(body.tags) ? this.stringArray(body.tags) : undefined,
           marketingConsent: this.optionalBoolean(body.marketingConsent),
           marketingConsentSource: this.optionalString(body.marketingConsentSource),
@@ -114,15 +187,124 @@ export class CrmService {
           lastActivityAt: new Date(),
         },
       });
-      await this.logActivity(tx, tenantId, actorUserId, 'contact_updated', `Updated contact ${contact.firstName} ${contact.lastName}`, { contactId: id, companyId: contact.companyId });
-      return contact;
+      await this.logActivity(tx, tenantId, actorUserId, 'contact_updated', `Updated contact ${updated.firstName} ${updated.lastName}`, { contactId: id, companyId: updated.companyId });
+      return updated;
     });
+
+    if (contact.status !== previous.status) {
+      this.automation.onContactStatusChanged(tenantId, id, previous.status, contact.status).catch(() => {});
+    }
+
+    return contact;
   }
 
   async deleteContact(tenantId: string, id: string) {
     await this.getContact(tenantId, id);
     await this.prisma.contact.delete({ where: { id } });
     return { success: true };
+  }
+
+  async bulkContacts(tenantId: string, actorUserId: string, body: Record<string, unknown>) {
+    const ids = this.stringArray(body.ids ?? body.contactIds);
+    if (!ids.length) throw new BadRequestException('ids array is required');
+    const action = this.requiredString(body.action, 'action');
+    const contacts = await this.prisma.contact.findMany({ where: { tenantId, id: { in: ids } }, select: { id: true, tags: true } });
+    if (!contacts.length) throw new BadRequestException('No matching contacts found');
+    const validIds = contacts.map((contact) => contact.id);
+
+    if (action === 'delete') {
+      const result = await this.prisma.contact.deleteMany({ where: { tenantId, id: { in: validIds } } });
+      await this.createActivity(tenantId, actorUserId, { type: 'contacts_bulk_deleted', subject: `Deleted ${result.count} contacts` });
+      return { action, affected: result.count };
+    }
+
+    if (action === 'update') {
+      const result = await this.prisma.contact.updateMany({
+        where: { tenantId, id: { in: validIds } },
+        data: {
+          status: this.optionalEnum(body.status, Object.values(ContactStatus)),
+          assignedTo: this.optionalString(body.assignedTo),
+          marketingConsent: this.optionalBoolean(body.marketingConsent),
+          lastActivityAt: new Date(),
+        },
+      });
+      await this.createActivity(tenantId, actorUserId, { type: 'contacts_bulk_updated', subject: `Updated ${result.count} contacts` });
+      return { action, affected: result.count };
+    }
+
+    if (action === 'tag') {
+      const tags = this.stringArray(body.tags);
+      if (!tags.length) throw new BadRequestException('tags array is required');
+      await this.prisma.$transaction(contacts.map((contact) => this.prisma.contact.update({
+        where: { id: contact.id },
+        data: { tags: Array.from(new Set([...contact.tags, ...tags])), lastActivityAt: new Date() },
+      })));
+      await this.createActivity(tenantId, actorUserId, { type: 'contacts_bulk_tagged', subject: `Tagged ${contacts.length} contacts` });
+      return { action, affected: contacts.length };
+    }
+
+    throw new BadRequestException('Unsupported bulk action');
+  }
+
+  async mergeContacts(tenantId: string, actorUserId: string, body: Record<string, unknown>) {
+    const primaryId = this.requiredString(body.primaryId, 'primaryId');
+    const duplicateIds = this.stringArray(body.duplicateIds).filter((id) => id !== primaryId);
+    if (!duplicateIds.length) throw new BadRequestException('duplicateIds array is required');
+    const primary = await this.getContact(tenantId, primaryId);
+    const duplicates = await this.prisma.contact.findMany({ where: { tenantId, id: { in: duplicateIds } } });
+    if (duplicates.length !== duplicateIds.length) throw new BadRequestException('One or more duplicate contacts were not found');
+
+    const mergedTags = Array.from(new Set([...primary.tags, ...duplicates.flatMap((contact) => contact.tags)]));
+    await this.prisma.$transaction(async (tx) => {
+      await tx.activity.updateMany({ where: { tenantId, contactId: { in: duplicateIds } }, data: { contactId: primaryId } });
+      await tx.campaignRecipient.updateMany({ where: { campaign: { tenantId }, contactId: { in: duplicateIds } }, data: { contactId: primaryId } });
+      await tx.coldProspect.updateMany({ where: { contactId: { in: duplicateIds } }, data: { contactId: primaryId } });
+      await tx.contact.update({
+        where: { id: primaryId },
+        data: {
+          phone: primary.phone ?? duplicates.find((contact) => contact.phone)?.phone,
+          jobTitle: primary.jobTitle ?? duplicates.find((contact) => contact.jobTitle)?.jobTitle,
+          companyId: primary.companyId ?? duplicates.find((contact) => contact.companyId)?.companyId,
+          tags: mergedTags,
+          lastActivityAt: new Date(),
+        },
+      });
+      await tx.contact.deleteMany({ where: { tenantId, id: { in: duplicateIds } } });
+      await this.logActivity(tx, tenantId, actorUserId, 'contacts_merged', `Merged ${duplicates.length} duplicate contacts`, { contactId: primaryId });
+    });
+
+    return this.getContact(tenantId, primaryId);
+  }
+
+  async exportContactsCsv(tenantId: string, query: Record<string, string>) {
+    const where: Prisma.ContactWhereInput = {
+      tenantId,
+      ...(query.status ? { status: query.status as ContactStatus } : {}),
+      ...(query.q ? {
+        OR: [
+          { firstName: { contains: query.q, mode: 'insensitive' } },
+          { lastName: { contains: query.q, mode: 'insensitive' } },
+          { email: { contains: query.q, mode: 'insensitive' } },
+        ],
+      } : {}),
+    };
+    const contacts = await this.prisma.contact.findMany({ where, orderBy: { createdAt: 'desc' }, take: 10000 });
+    const rows = [
+      ['First Name', 'Last Name', 'Email', 'Phone', 'Job Title', 'Status', 'Source', 'Tags', 'Marketing Consent', 'Created At'],
+      ...contacts.map((contact) => [
+        contact.firstName,
+        contact.lastName,
+        contact.email,
+        contact.phone ?? '',
+        contact.jobTitle ?? '',
+        contact.status,
+        contact.source,
+        contact.tags.join('; '),
+        String(contact.marketingConsent),
+        contact.createdAt.toISOString(),
+      ]),
+    ];
+    return rows.map((row) => row.map((cell) => this.csvCell(cell)).join(',')).join('\n');
   }
 
   async sendContactsToColdOutreach(tenantId: string, actorUserId: string, body: Record<string, unknown>) {
@@ -358,6 +540,7 @@ export class CrmService {
           assignedTo: this.requiredString(body.assignedTo, 'assignedTo'),
           status: this.optionalEnum(body.status, Object.values(DealStatus), DealStatus.open),
           probability: this.optionalNumber(body.probability, 0) ?? 0,
+          interestedServices: this.stringArray(body.interestedServices),
           expectedCloseDate: typeof body.expectedCloseDate === 'string' ? new Date(body.expectedCloseDate) : undefined,
         },
       });
@@ -373,9 +556,12 @@ export class CrmService {
   }
 
   async updateDeal(tenantId: string, actorUserId: string, id: string, body: Record<string, unknown>) {
-    await this.getDeal(tenantId, id);
-    return this.prisma.$transaction(async (tx) => {
-      const deal = await tx.deal.update({
+    const previous = await this.getDeal(tenantId, id);
+    if (typeof body.stage === 'string' && body.stage.trim() && body.stage.trim() !== previous.stage) {
+      await this.validateDealStageTransition(tenantId, previous.stage, body.stage.trim());
+    }
+    const deal = await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.deal.update({
         where: { id },
         data: {
           title: this.optionalString(body.title),
@@ -386,12 +572,25 @@ export class CrmService {
           assignedTo: this.optionalString(body.assignedTo),
           status: this.optionalEnum(body.status, Object.values(DealStatus)),
           probability: this.optionalNumber(body.probability),
+          interestedServices: Array.isArray(body.interestedServices) ? this.stringArray(body.interestedServices) : undefined,
           expectedCloseDate: typeof body.expectedCloseDate === 'string' ? new Date(body.expectedCloseDate) : undefined,
         },
       });
-      await this.logActivity(tx, tenantId, actorUserId, 'deal_updated', `Updated deal ${deal.title}`, { dealId: id, companyId: deal.companyId });
-      return deal;
+      await this.logActivity(tx, tenantId, actorUserId, 'deal_updated', `Updated deal ${updated.title}`, { dealId: id, companyId: updated.companyId });
+      return updated;
     });
+
+    const statusChanged = deal.status !== previous.status;
+    const stageChanged = deal.stage !== previous.stage;
+
+    if (statusChanged || stageChanged) {
+      this.automation.onDealStatusChanged(tenantId, id, previous.status, deal.status, previous.stage, deal.stage).catch(() => {});
+    }
+    if (stageChanged) {
+      this.automation.onDealStageChanged(tenantId, id, previous.stage, deal.stage).catch(() => {});
+    }
+
+    return deal;
   }
 
   async deleteDeal(tenantId: string, id: string) {
@@ -426,6 +625,30 @@ export class CrmService {
         createdBy: this.optionalString(body.createdBy) ?? actorUserId,
       },
     });
+  }
+
+  async updateActivity(tenantId: string, actorUserId: string, id: string, body: Record<string, unknown>) {
+    const activity = await this.prisma.activity.findFirst({ where: { tenantId, id } });
+    if (!activity) throw new NotFoundException('Activity not found');
+    return this.prisma.activity.update({
+      where: { id },
+      data: {
+        type: this.optionalString(body.type),
+        subject: this.optionalString(body.subject),
+        body: typeof body.body === 'string' ? body.body : undefined,
+        contactId: this.optionalString(body.contactId),
+        companyId: this.optionalString(body.companyId),
+        dealId: this.optionalString(body.dealId),
+        createdBy: this.optionalString(body.createdBy) ?? actorUserId,
+      },
+    });
+  }
+
+  async deleteActivity(tenantId: string, id: string) {
+    const activity = await this.prisma.activity.findFirst({ where: { tenantId, id } });
+    if (!activity) throw new NotFoundException('Activity not found');
+    await this.prisma.activity.delete({ where: { id } });
+    return { success: true };
   }
 
   // Pipeline Stages
@@ -804,5 +1027,21 @@ export class CrmService {
 
   private validEmail(value: string) {
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+  }
+
+  private async validateDealStageTransition(tenantId: string, fromStage: string, toStage: string) {
+    const stages = await this.prisma.pipelineStage.findMany({ where: { tenantId }, orderBy: { order: 'asc' } });
+    if (!stages.length) return;
+    const fromIndex = stages.findIndex((stage) => stage.name === fromStage);
+    const toIndex = stages.findIndex((stage) => stage.name === toStage);
+    if (fromIndex === -1 || toIndex === -1) throw new BadRequestException('Deal stage is not configured in the pipeline');
+    if (Math.abs(toIndex - fromIndex) > 1) {
+      throw new BadRequestException('Deals can only move to the next or previous pipeline stage');
+    }
+  }
+
+  private csvCell(value: unknown) {
+    const text = String(value ?? '');
+    return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
   }
 }

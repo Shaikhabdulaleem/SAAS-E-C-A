@@ -1,11 +1,13 @@
-import { BadRequestException, Body, Controller, Delete, Get, Headers, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Headers, Param, Patch, Post, Query, Res, UseGuards } from '@nestjs/common';
 import { UserRole } from '@prisma/client';
+import { Response } from 'express';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { RequireService } from '../auth/decorators/required-service.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { ServiceAccessGuard } from '../auth/guards/service-access.guard';
 import { AuthenticatedUser } from '../auth/types';
 import { CrmService } from './crm.service';
+import { CrmAutomationService } from './crm-automation.service';
 
 export class TenantScopedController {
   protected tenantId(user: AuthenticatedUser, selectedTenantId?: string) {
@@ -63,9 +65,32 @@ export class ContactsController extends TenantScopedController {
     return this.crm.sendContactsToColdOutreach(this.tenantId(user, selectedTenantId), user.id, body);
   }
 
+  @Get('export.csv')
+  async exportCsv(@CurrentUser() user: AuthenticatedUser, @Query() query: Record<string, string>, @Res() response: Response, @Headers('x-tenant-id') selectedTenantId?: string) {
+    const csv = await this.crm.exportContactsCsv(this.tenantId(user, selectedTenantId), query);
+    response.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    response.setHeader('Content-Disposition', 'attachment; filename="contacts.csv"');
+    return response.send(csv);
+  }
+
+  @Post('bulk')
+  bulk(@CurrentUser() user: AuthenticatedUser, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.crm.bulkContacts(this.tenantId(user, selectedTenantId), user.id, body);
+  }
+
+  @Post('merge')
+  merge(@CurrentUser() user: AuthenticatedUser, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.crm.mergeContacts(this.tenantId(user, selectedTenantId), user.id, body);
+  }
+
   @Get(':id')
   get(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Headers('x-tenant-id') selectedTenantId?: string) {
     return this.crm.getContact(this.tenantId(user, selectedTenantId), id);
+  }
+
+  @Get(':id/engagement')
+  engagement(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.crm.getContactEngagement(this.tenantId(user, selectedTenantId), id);
   }
 
   @Patch(':id')
@@ -158,6 +183,16 @@ export class ActivitiesController extends TenantScopedController {
   create(@CurrentUser() user: AuthenticatedUser, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
     return this.crm.createActivity(this.tenantId(user, selectedTenantId), user.id, body);
   }
+
+  @Patch(':id')
+  update(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.crm.updateActivity(this.tenantId(user, selectedTenantId), user.id, id, body);
+  }
+
+  @Delete(':id')
+  remove(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.crm.deleteActivity(this.tenantId(user, selectedTenantId), id);
+  }
 }
 
 @Controller('pipeline-stages')
@@ -216,5 +251,27 @@ export class TagsController extends TenantScopedController {
   @Delete(':id')
   remove(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Headers('x-tenant-id') selectedTenantId?: string) {
     return this.crm.deleteTag(this.tenantId(user, selectedTenantId), id);
+  }
+}
+
+@Controller('crm/automation')
+@RequireService('crm')
+@UseGuards(JwtAuthGuard, ServiceAccessGuard)
+export class CrmAutomationController extends TenantScopedController {
+  constructor(private readonly automation: CrmAutomationService) { super(); }
+
+  @Get('stale-deals')
+  staleDeals(@CurrentUser() user: AuthenticatedUser, @Query('days') days?: string, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.automation.getStaleDeals(this.tenantId(user, selectedTenantId), days ? Number(days) : 14);
+  }
+
+  @Get('proposal-follow-ups')
+  proposalFollowUps(@CurrentUser() user: AuthenticatedUser, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.automation.getProposalFollowUps(this.tenantId(user, selectedTenantId));
+  }
+
+  @Get('deal-forecast')
+  dealForecast(@CurrentUser() user: AuthenticatedUser, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.automation.getDealForecast(this.tenantId(user, selectedTenantId));
   }
 }

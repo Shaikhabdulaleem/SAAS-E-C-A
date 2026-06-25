@@ -44,6 +44,47 @@ export class CallsService {
     return session;
   }
 
+  async updateSession(tenantId: string, id: string, body: Record<string, unknown>) {
+    await this.ensureSession(tenantId, id);
+    return this.prisma.callSession.update({
+      where: { id },
+      data: {
+        title: this.optionalString(body.title),
+        provider: this.optionalString(body.provider),
+        providerCallId: this.optionalString(body.providerCallId),
+        contactId: this.optionalString(body.contactId),
+        dealId: this.optionalString(body.dealId),
+        status: this.optionalString(body.status) as never,
+        startedAt: this.optionalDate(body.startedAt),
+        endedAt: this.optionalDate(body.endedAt),
+        durationSec: this.optionalNumber(body.durationSec),
+      },
+    });
+  }
+
+  async deleteSession(tenantId: string, id: string) {
+    await this.ensureSession(tenantId, id);
+    await this.prisma.callSession.delete({ where: { id } });
+    return { success: true };
+  }
+
+  async search(tenantId: string, query: Record<string, string>) {
+    const q = this.requiredString(query.q, 'q');
+    const transcripts = await this.prisma.callTranscript.findMany({
+      where: { tenantId, text: { contains: q, mode: 'insensitive' } },
+      include: { session: true },
+      orderBy: { createdAt: 'desc' },
+      take: Math.min(Math.max(Number(query.pageSize ?? 25), 1), 100),
+    });
+    return transcripts.map((transcript) => ({
+      sessionId: transcript.sessionId,
+      title: transcript.session.title,
+      transcriptId: transcript.id,
+      createdAt: transcript.createdAt,
+      snippet: this.snippet(transcript.text, q),
+    }));
+  }
+
   async addRecording(tenantId: string, sessionId: string, body: Record<string, unknown>) {
     await this.ensureSession(tenantId, sessionId);
     return this.prisma.callRecording.create({
@@ -135,5 +176,12 @@ export class CallsService {
 
   private json(value: unknown): Prisma.InputJsonValue | undefined {
     return value === undefined ? undefined : value as Prisma.InputJsonValue;
+  }
+
+  private snippet(text: string, query: string) {
+    const index = text.toLowerCase().indexOf(query.toLowerCase());
+    const start = Math.max(index - 80, 0);
+    const end = Math.min((index === -1 ? 160 : index + query.length + 80), text.length);
+    return text.slice(start, end);
   }
 }

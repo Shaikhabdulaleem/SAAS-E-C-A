@@ -97,6 +97,7 @@ export function DomainHealth() {
   const [domains, setDomains] = useState<DomainHealthData[]>([]);
   const [loading, setLoading] = useState(true);
   const [checking, setChecking] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
   useEffect(() => { fetchData(); }, []);
@@ -105,7 +106,8 @@ export function DomainHealth() {
     try {
       const data = await apiRequest<DomainHealthData[]>('/provisioning/domain-health');
       setDomains(data);
-    } catch {
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Operation failed');
     } finally {
       setLoading(false);
     }
@@ -116,7 +118,8 @@ export function DomainHealth() {
     try {
       const updated = await apiRequest<DomainHealthData>(`/provisioning/domain-health/${domainId}/check`, { method: 'POST' });
       setDomains(prev => prev.map(d => d.id === domainId ? updated : d));
-    } catch {
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Operation failed');
     } finally {
       setChecking(null);
     }

@@ -76,6 +76,7 @@ export function DomainManagement() {
   const [dnsApiKey, setDnsApiKey] = useState('');
   const [dnsZoneId, setDnsZoneId] = useState('');
   const [configuringDns, setConfiguringDns] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => { fetchData(); }, []);
 
@@ -88,7 +89,8 @@ export function DomainManagement() {
       setDomains(domainsData);
       setProviders(providersData);
       if (providersData.length > 0) setNewProviderCredentialId(providersData[0].id);
-    } catch {
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Operation failed');
     } finally {
       setLoading(false);
     }
@@ -110,7 +112,8 @@ export function DomainManagement() {
       setNewVolume(500);
       setShowAddDialog(false);
       await fetchData();
-    } catch {
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Operation failed');
     } finally {
       setAdding(false);
     }
@@ -125,7 +128,8 @@ export function DomainManagement() {
       });
       setShowProvisionDialog(null);
       await fetchData();
-    } catch {
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Operation failed');
     } finally {
       setProvisioning(false);
     }
@@ -143,7 +147,8 @@ export function DomainManagement() {
       setDnsApiKey('');
       setDnsZoneId('');
       await fetchData();
-    } catch {
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Operation failed');
     } finally {
       setConfiguringDns(false);
     }
@@ -156,7 +161,8 @@ export function DomainManagement() {
         body: JSON.stringify({ targetDailyVolume: volume }),
       });
       await fetchData();
-    } catch {
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Operation failed');
     }
   };
 
@@ -165,7 +171,8 @@ export function DomainManagement() {
     try {
       await apiRequest(`/cold-email/domains/${domainId}`, { method: 'DELETE' });
       setDomains(prev => prev.filter(domain => domain.id !== domainId));
-    } catch {
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Operation failed');
     }
   };
 

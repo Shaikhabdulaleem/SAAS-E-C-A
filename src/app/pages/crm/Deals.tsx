@@ -256,6 +256,16 @@ export function Deals() {
                           </Badge>
                         </div>
                         <Progress value={deal.probability} className="h-1 mb-2.5" />
+                        {(deal.interestedServices ?? []).length > 0 && (
+                          <div className="flex flex-wrap gap-1 mb-2">
+                            {deal.interestedServices.slice(0, 2).map((svc: string) => (
+                              <span key={svc} className="text-[10px] px-1.5 py-0.5 bg-primary/10 text-primary rounded">
+                                {svc.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase())}
+                              </span>
+                            ))}
+                            {deal.interestedServices.length > 2 && <span className="text-[10px] text-muted-foreground">+{deal.interestedServices.length - 2}</span>}
+                          </div>
+                        )}
                         {deal.expectedCloseDate && (
                           <div className="flex items-center gap-1 text-xs text-muted-foreground">
                             <Calendar className="h-3 w-3" />

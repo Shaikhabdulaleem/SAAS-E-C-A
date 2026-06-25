@@ -68,27 +68,23 @@ function buildNavGroups(user: User | null, activeServices: string[] = [], isImpe
     },
   ];
 
-  if (has('crm')) {
-    groups.push({
-      label: 'CRM',
-      items: [
+  if (has('crm') || has('proposals')) {
+    const crmItems: typeof groups[0]['items'] = [];
+    if (has('crm')) {
+      crmItems.push(
         { name: 'Contacts', href: '/contacts', icon: Users },
-        { name: 'Companies', href: '/companies', icon: Building2 },
-        { name: 'Deals', href: '/deals', icon: TrendingUp },
-      ],
-    });
-  }
-
-  if (has('proposals')) {
-    groups.push({
-      label: 'Proposals',
-      items: [
-        { name: 'All Proposals', href: '/proposals', icon: FileText },
-        { name: 'Create Proposal', href: '/proposals/create', icon: FileText },
-        { name: 'Brand Settings', href: '/settings/brand', icon: Palette },
-        { name: 'Service Pricing', href: '/settings/service-pricing', icon: DollarSign },
-      ],
-    });
+        { name: 'Pipeline', href: '/deals', icon: TrendingUp },
+      );
+    }
+    if (has('proposals')) {
+      crmItems.push(
+        { name: 'Proposals', href: '/proposals', icon: FileText },
+      );
+    }
+    crmItems.push(
+      { name: 'Settings', href: '/crm/settings', icon: Settings },
+    );
+    groups.push({ label: 'CRM', items: crmItems });
   }
 
   if (has('finance')) {
@@ -333,9 +329,10 @@ export function MainLayout() {
     const path = location.pathname;
     if (path === '/') return 'Dashboard';
     if (path.startsWith('/contacts')) return 'Contacts';
-    if (path.startsWith('/companies')) return 'Companies';
-    if (path.startsWith('/deals')) return 'Deals';
+    if (path.startsWith('/companies')) return 'Contacts';
+    if (path.startsWith('/deals')) return 'Pipeline';
     if (path.startsWith('/proposals')) return 'Proposals';
+    if (path.startsWith('/crm/settings')) return 'CRM Settings';
     if (path.startsWith('/finance')) return 'Finance';
     if (path.startsWith('/campaigns')) return 'Campaigns';
     if (path.startsWith('/domain-setup')) return 'Domain Setup';

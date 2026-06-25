@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { ProvidersModule } from '../providers/providers.module';
+import { CrmModule } from '../crm/crm.module';
 import { AdminProposalsController, ProposalsController } from './proposals.controller';
 import { ProposalPublicController } from './proposal-public.controller';
 import { ClientSettingsController } from './client-settings.controller';
@@ -14,7 +15,7 @@ import { ClientSettingsService } from './client-settings.service';
 import { ProposalTemplateService } from './proposal-template.service';
 
 @Module({
-  imports: [AuthModule, ProvidersModule],
+  imports: [AuthModule, ProvidersModule, CrmModule],
   controllers: [
     ProposalsController,
     AdminProposalsController,

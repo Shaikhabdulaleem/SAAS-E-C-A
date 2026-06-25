@@ -49,6 +49,11 @@ export class EmailAutomationController {
     return this.automations.activateAutomation(tenantId(user, tid), id);
   }
 
+  @Post(':id/preflight')
+  preflight(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Headers('x-tenant-id') tid?: string) {
+    return this.automations.preflightAutomation(tenantId(user, tid), id);
+  }
+
   @Post(':id/pause')
   pause(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Headers('x-tenant-id') tid?: string) {
     return this.automations.pauseAutomation(tenantId(user, tid), id);

@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/ca
 import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
 import { Textarea } from '../../components/ui/textarea';
+import { FileUploadField } from '../../components/ui/file-upload-field';
 
 interface BrandData {
   companyName: string | null;
@@ -35,7 +36,7 @@ const defaultBrand: BrandData = {
   proposalPrefix: '',
 };
 
-export function BrandSettings() {
+export function BrandSettings({ hideHeader = false }: { hideHeader?: boolean }) {
   const [form, setForm] = useState<BrandData>(defaultBrand);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -72,13 +73,15 @@ export function BrandSettings() {
 
   return (
     <div className="max-w-5xl mx-auto space-y-5">
-      <div className="flex items-center gap-2">
-        <div className="p-1.5 rounded-lg bg-primary/10"><Palette className="h-4 w-4 text-primary" /></div>
-        <div>
-          <h1 className="text-xl font-semibold">Brand Settings</h1>
-          <p className="text-sm text-muted-foreground">Configure your branding for proposals and client-facing documents.</p>
+      {!hideHeader && (
+        <div className="flex items-center gap-2">
+          <div className="p-1.5 rounded-lg bg-primary/10"><Palette className="h-4 w-4 text-primary" /></div>
+          <div>
+            <h1 className="text-xl font-semibold">Brand Settings</h1>
+            <p className="text-sm text-muted-foreground">Configure your branding for proposals and client-facing documents.</p>
+          </div>
         </div>
-      </div>
+      )}
 
       {(error || message) && (
         <div className={`rounded-lg border px-3 py-2 text-sm ${error ? 'border-red-200 bg-red-50 text-red-800' : 'border-emerald-200 bg-emerald-50 text-emerald-800'}`}>
@@ -130,8 +133,27 @@ export function BrandSettings() {
               <CardContent>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   <div className="space-y-1.5">
-                    <Label>Logo URL</Label>
-                    <Input value={form.logoUrl ?? ''} onChange={(e) => set('logoUrl', e.target.value)} placeholder="https://..." />
+                    <Label>Logo</Label>
+                    <FileUploadField
+                      currentUrl={form.logoUrl}
+                      accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
+                      label="Upload logo"
+                      onChange={async (file) => {
+                        if (file) {
+                          const fd = new FormData();
+                          fd.append('logo', file);
+                          try {
+                            const result = await apiRequest<BrandData>('/client/brand-settings/logo', { method: 'POST', body: fd });
+                            setForm(prev => ({ ...prev, logoUrl: result.logoUrl }));
+                          } catch (err) { setError(err instanceof Error ? err.message : 'Upload failed'); }
+                        } else {
+                          try {
+                            const result = await apiRequest<BrandData>('/client/brand-settings/logo', { method: 'DELETE' });
+                            setForm(prev => ({ ...prev, logoUrl: result.logoUrl }));
+                          } catch (err) { setError(err instanceof Error ? err.message : 'Remove failed'); }
+                        }
+                      }}
+                    />
                   </div>
                   <div className="space-y-1.5">
                     <Label>Primary Color</Label>
@@ -163,7 +185,7 @@ export function BrandSettings() {
               <CardContent>
                 <div className="rounded-lg border p-4 space-y-3" style={{ fontFamily: form.fontFamily }}>
                   {form.logoUrl ? (
-                    <img src={form.logoUrl} alt="Logo" className="max-h-10" />
+                    <img src={form.logoUrl.startsWith('/uploads/') ? `${(import.meta.env.VITE_API_URL ?? 'http://localhost:3002/api').replace(/\/api$/, '')}${form.logoUrl}` : form.logoUrl} alt="Logo" className="max-h-10" />
                   ) : (
                     <div className="text-lg font-bold" style={{ color: form.primaryColor }}>{form.companyName || 'Company Name'}</div>
                   )}

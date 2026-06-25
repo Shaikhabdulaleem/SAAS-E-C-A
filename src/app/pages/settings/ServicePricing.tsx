@@ -21,7 +21,6 @@ interface PricingItem {
 const SERVICE_DEFAULTS: Array<{ serviceType: string; label: string; plans: Array<{ name: string; mccCost: number }> }> = [
   { serviceType: 'email_marketing', label: 'Email Marketing', plans: [{ name: 'Growth', mccCost: 29 }, { name: 'Pro', mccCost: 89 }, { name: 'Enterprise', mccCost: 239 }] },
   { serviceType: 'cold_outreach', label: 'Cold Outreach', plans: [{ name: 'Growth', mccCost: 47 }, { name: 'Pro', mccCost: 119 }, { name: 'Enterprise', mccCost: 299 }] },
-  { serviceType: 'crm', label: 'CRM', plans: [{ name: 'Growth', mccCost: 17 }, { name: 'Pro', mccCost: 59 }, { name: 'Enterprise', mccCost: 149 }] },
   { serviceType: 'ai_call_assistant', label: 'AI Call Assistant', plans: [{ name: 'Growth', mccCost: 59 }, { name: 'Pro', mccCost: 149 }, { name: 'Enterprise', mccCost: 359 }] },
   { serviceType: 'advanced_analytics', label: 'Advanced Analytics', plans: [{ name: 'Growth', mccCost: 29 }, { name: 'Pro', mccCost: 89 }, { name: 'Enterprise', mccCost: 209 }] },
 ];
@@ -32,7 +31,7 @@ function marginColor(pct: number) {
   return 'text-red-600';
 }
 
-export function ServicePricing() {
+export function ServicePricing({ hideHeader = false }: { hideHeader?: boolean }) {
   const [items, setItems] = useState<PricingItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -94,13 +93,15 @@ export function ServicePricing() {
 
   return (
     <div className="max-w-5xl mx-auto space-y-5">
-      <div className="flex items-center gap-2">
-        <div className="p-1.5 rounded-lg bg-primary/10"><DollarSign className="h-4 w-4 text-primary" /></div>
-        <div>
-          <h1 className="text-xl font-semibold">Service Pricing</h1>
-          <p className="text-sm text-muted-foreground">Set your selling prices for each service plan. Your margin is calculated automatically.</p>
+      {!hideHeader && (
+        <div className="flex items-center gap-2">
+          <div className="p-1.5 rounded-lg bg-primary/10"><DollarSign className="h-4 w-4 text-primary" /></div>
+          <div>
+            <h1 className="text-xl font-semibold">Service Pricing</h1>
+            <p className="text-sm text-muted-foreground">Set your selling prices for each service plan. Your margin is calculated automatically.</p>
+          </div>
         </div>
-      </div>
+      )}
 
       {(error || message) && (
         <div className={`rounded-lg border px-3 py-2 text-sm ${error ? 'border-red-200 bg-red-50 text-red-800' : 'border-emerald-200 bg-emerald-50 text-emerald-800'}`}>

@@ -293,7 +293,47 @@ export class AuthService {
         expiresAt: new Date(Date.now() + 1000 * 60 * 30),
       },
     });
+
+    const appUrl = process.env.APP_PUBLIC_URL ?? 'http://localhost:5173';
+    const resetUrl = `${appUrl}/password-reset?token=${token}`;
+    await this.sendPasswordResetEmail(user.email, user.name, resetUrl);
+
     return { success: true };
+  }
+
+  private async sendPasswordResetEmail(to: string, name: string, resetUrl: string) {
+    const apiKey = process.env.SENDGRID_API_KEY;
+    const fromEmail = process.env.SYSTEM_FROM_EMAIL ?? 'noreply@nexushq.io';
+    const fromName = process.env.SYSTEM_FROM_NAME ?? 'NexusHQ';
+    const html = `
+      <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto;">
+        <h2>Password Reset</h2>
+        <p>Hi ${name},</p>
+        <p>We received a request to reset your password. Click the button below to set a new password:</p>
+        <p style="text-align: center; margin: 24px 0;">
+          <a href="${resetUrl}" style="background: #2563eb; color: #fff; padding: 12px 24px; border-radius: 6px; text-decoration: none; display: inline-block;">Reset Password</a>
+        </p>
+        <p style="font-size: 13px; color: #6b7280;">This link expires in 30 minutes. If you didn't request this, you can safely ignore this email.</p>
+      </div>`;
+
+    if (!apiKey) {
+      console.warn(`[EMAIL-SIM] Password reset email to ${to} — link: ${resetUrl}`);
+      return;
+    }
+    try {
+      await fetch('https://api.sendgrid.com/v3/mail/send', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          personalizations: [{ to: [{ email: to }] }],
+          from: { email: fromEmail, name: fromName },
+          subject: 'Reset your NexusHQ password',
+          content: [{ type: 'text/html', value: html }],
+        }),
+      });
+    } catch (error) {
+      console.error('Password reset email failed:', error instanceof Error ? error.message : error);
+    }
   }
 
   async confirmPasswordReset(token: string | undefined, nextPassword: string | undefined) {

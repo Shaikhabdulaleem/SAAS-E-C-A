@@ -105,7 +105,7 @@ export function DomainPurchase() {
         if (o.status === 'awaiting_confirmation') { clearInterval(pollRef.current!); setStep(3); }
         if (o.status === 'completed' || o.status === 'failed') { clearInterval(pollRef.current!); setStep(5); }
         if (['purchasing', 'setting_nameservers', 'configuring_dns', 'creating_mailboxes', 'warming_up'].includes(o.status)) setStep(4);
-      } catch {}
+      } catch (err) { console.error('Polling order failed:', err instanceof Error ? err.message : err); }
     }, 3000);
   };
 

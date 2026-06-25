@@ -9,6 +9,7 @@ type Recipient = {
   email: string;
   firstName?: string;
   lastName?: string;
+  contactId?: string;
   status: string;
   attempts: number;
   sentAt?: string;
@@ -442,7 +443,7 @@ export function CampaignDetail() {
                 <tbody>
                   {recipients.map(recipient => (
                     <tr key={recipient.id} className="border-t border-gray-100 hover:bg-gray-50">
-                      <td className="px-6 py-3">{recipient.email}</td>
+                      <td className="px-6 py-3">{recipient.contactId ? <Link to={`/contacts/${recipient.contactId}`} className="text-blue-600 hover:underline">{recipient.firstName ? `${recipient.firstName} ${recipient.lastName ?? ''}`.trim() : recipient.email}</Link> : recipient.email}</td>
                       <td className="px-6 py-3 capitalize">{recipient.status.replace(/_/g, ' ')}</td>
                       <td className="px-6 py-3">{recipient.attempts}</td>
                       <td className="px-6 py-3">{recipient.sentAt ? new Date(recipient.sentAt).toLocaleString() : recipient.lastError || '-'}</td>

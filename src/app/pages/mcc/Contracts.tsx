@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router';
 import { FileSignature, Plus, Pencil, Trash2, AlertCircle, DollarSign, Clock, CheckCircle } from 'lucide-react';
 import { apiRequest } from '../../lib/api';
+import { FileUploadField } from '../../components/ui/file-upload-field';
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
@@ -485,13 +486,32 @@ export function Contracts() {
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="contract-doc">Document URL</Label>
-              <Input
-                id="contract-doc"
-                value={form.documentUrl}
-                onChange={(e) => setForm((p) => ({ ...p, documentUrl: e.target.value }))}
-                placeholder="https://..."
-              />
+              <Label>Document</Label>
+              {editingId ? (
+                <FileUploadField
+                  currentUrl={form.documentUrl}
+                  accept=".pdf,.doc,.docx"
+                  label="Upload document"
+                  previewType="link"
+                  onChange={async (file) => {
+                    if (file) {
+                      const fd = new FormData();
+                      fd.append('document', file);
+                      try {
+                        const result = await apiRequest<Contract>(`/admin/contracts/${editingId}/document`, { method: 'POST', body: fd });
+                        setForm(p => ({ ...p, documentUrl: result.documentUrl ?? '' }));
+                      } catch {}
+                    } else {
+                      try {
+                        const result = await apiRequest<Contract>(`/admin/contracts/${editingId}/document`, { method: 'DELETE' });
+                        setForm(p => ({ ...p, documentUrl: '' }));
+                      } catch {}
+                    }
+                  }}
+                />
+              ) : (
+                <p className="text-sm text-muted-foreground">Save the contract first, then upload a document.</p>
+              )}
             </div>
 
             <div className="space-y-2">

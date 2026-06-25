@@ -1,7 +1,8 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { AutomationStatus, AutomationTriggerType } from '@prisma/client';
+import { AutomationStatus, AutomationTriggerType, DnsRecordStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { JobsService } from '../providers/services/jobs.service';
+import { contentQaWarnings } from './email-rendering';
 
 @Injectable()
 export class EmailAutomationService {
@@ -64,16 +65,45 @@ export class EmailAutomationService {
   }
 
   async activateAutomation(tenantId: string, automationId: string) {
-    const automation = await this.ensureAutomation(tenantId, automationId);
+    await this.ensureAutomation(tenantId, automationId);
     const steps = await this.prisma.automationStep.findMany({ where: { automationId } });
     if (steps.length === 0) throw new BadRequestException('Automation must have at least one step');
     const hasEmail = steps.some(s => s.type === 'send_email');
     if (!hasEmail) throw new BadRequestException('Automation must include at least one email step');
+    const preflight = await this.preflightAutomation(tenantId, automationId);
+    if (!preflight.ready) throw new BadRequestException(`Automation is not ready: ${preflight.blockingErrors.join(', ')}`);
     return this.prisma.emailAutomation.update({
       where: { id: automationId },
       data: { status: AutomationStatus.active },
       include: { steps: { orderBy: { stepOrder: 'asc' } } },
     });
+  }
+
+  async preflightAutomation(tenantId: string, automationId: string) {
+    await this.ensureAutomation(tenantId, automationId);
+    const steps = await this.prisma.automationStep.findMany({ where: { automationId }, orderBy: { stepOrder: 'asc' } });
+    const blockingErrors: string[] = [];
+    const warnings: string[] = [];
+    if (!steps.length) blockingErrors.push('Automation must have at least one step');
+    if (!steps.some((step) => step.type === 'send_email')) blockingErrors.push('Automation must include at least one email step');
+    for (const step of steps.filter((item) => item.type === 'send_email')) {
+      const config = step.config as Record<string, unknown>;
+      const fromEmail = typeof config.fromEmail === 'string' ? config.fromEmail.trim().toLowerCase() : '';
+      const body = typeof config.body === 'string' ? config.body : '';
+      const subject = typeof config.subject === 'string' ? config.subject : '';
+      if (!fromEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(fromEmail)) blockingErrors.push(`Step ${step.stepOrder}: valid sender email is required`);
+      if (!subject.trim()) blockingErrors.push(`Step ${step.stepOrder}: subject is required`);
+      if (!body.trim()) blockingErrors.push(`Step ${step.stepOrder}: body is required`);
+      if (typeof config.companyAddress !== 'string' || !config.companyAddress.trim()) blockingErrors.push(`Step ${step.stepOrder}: company address is required`);
+      const domainName = fromEmail.split('@')[1];
+      const domain = domainName ? await this.prisma.sendingDomain.findFirst({ where: { tenantId, domain: domainName } }) : null;
+      const verified = !!domain && [domain.spfStatus, domain.dkimStatus, domain.dmarcStatus, domain.mxStatus].every((status) => status === DnsRecordStatus.verified);
+      if (!verified) blockingErrors.push(`Step ${step.stepOrder}: sender domain must be verified`);
+      const contentWarnings = contentQaWarnings({ subject, body });
+      blockingErrors.push(...contentWarnings.filter((warning) => warning.severity === 'error').map((warning) => `Step ${step.stepOrder}: ${warning.label}`));
+      warnings.push(...contentWarnings.filter((warning) => warning.severity === 'warning').map((warning) => `Step ${step.stepOrder}: ${warning.label}`));
+    }
+    return { ready: blockingErrors.length === 0, blockingErrors: Array.from(new Set(blockingErrors)), warnings };
   }
 
   async pauseAutomation(tenantId: string, automationId: string) {
@@ -167,6 +197,9 @@ export class EmailAutomationService {
     } else {
       throw new BadRequestException('Provide contactIds or segmentId');
     }
+    const suppressed = await this.prisma.suppressionEntry.findMany({ where: { tenantId, email: { in: contacts.map((contact) => contact.email.toLowerCase()) } }, select: { email: true } });
+    const suppressedEmails = new Set(suppressed.map((item) => item.email.toLowerCase()));
+    contacts = contacts.filter((contact) => !suppressedEmails.has(contact.email.toLowerCase()));
     let enrolled = 0;
     for (const contact of contacts) {
       try {

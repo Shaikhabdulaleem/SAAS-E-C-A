@@ -6,7 +6,7 @@ import {
   MailboxStatus,
   WarmupStatus,
 } from '@prisma/client';
-import * as dns from 'dns';
+import { Resolver } from 'dns/promises';
 import * as net from 'net';
 import { PrismaService } from '../prisma/prisma.service';
 import { DnsProviderService } from '../providers/services/dns-provider.service';
@@ -16,13 +16,18 @@ import { EncryptionService } from '../tenants/encryption.service';
 
 @Injectable()
 export class ColdEmailService {
+  private readonly dnsResolver: Resolver;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly dnsProvider: DnsProviderService,
     private readonly jobs: JobsService,
     private readonly emailDelivery: EmailDeliveryService,
     private readonly encryption: EncryptionService,
-  ) {}
+  ) {
+    this.dnsResolver = new Resolver();
+    this.dnsResolver.setServers(['8.8.8.8', '1.1.1.1']);
+  }
 
   // ---------------------------------------------------------------------------
   // Sending Domains
@@ -142,7 +147,7 @@ export class ColdEmailService {
       data: {
         tenantId,
         provider: this.requiredEnum<MailboxProvider>(body.provider, Object.values(MailboxProvider) as MailboxProvider[], 'provider'),
-        email: this.requiredString(body.email, 'email'),
+        email: this.requiredEmail(body.email, 'email'),
         fromName: this.requiredString(body.fromName, 'fromName'),
         replyToEmail: this.optionalString(body.replyToEmail),
         dailySendLimit,
@@ -194,6 +199,20 @@ export class ColdEmailService {
     await this.ensureMailbox(tenantId, id);
     await this.prisma.coldMailbox.delete({ where: { id } });
     return { success: true };
+  }
+
+  async clearAllMailboxes(tenantId: string) {
+    const activeCampaigns = await this.prisma.coldCampaign.count({
+      where: { tenantId, status: ColdCampaignStatus.active },
+    });
+    if (activeCampaigns > 0) {
+      throw new BadRequestException(`Cannot clear mailboxes while ${activeCampaigns} campaign(s) are active. Pause them first.`);
+    }
+    const [mailboxes, personas] = await Promise.all([
+      this.prisma.coldMailbox.deleteMany({ where: { tenantId } }),
+      this.prisma.persona.deleteMany({ where: { tenantId } }),
+    ]);
+    return { success: true, deleted: mailboxes.count + personas.count };
   }
 
   async toggleWarmup(tenantId: string, id: string) {
@@ -317,6 +336,13 @@ export class ColdEmailService {
     });
     const existingEmails = new Set(existingProspects.map((p: { email: string }) => p.email.toLowerCase()));
 
+    // Check suppression list to skip bounced/unsubscribed/complained emails
+    const suppressedEntries = await this.prisma.suppressionEntry.findMany({
+      where: { tenantId },
+      select: { email: true },
+    });
+    const suppressedEmails = new Set(suppressedEntries.map((s: { email: string }) => s.email.toLowerCase()));
+
     const toCreate: Array<{
       listId: string;
       email: string;
@@ -331,8 +357,10 @@ export class ColdEmailService {
       customVar5?: string;
     }> = [];
 
+    let suppressedCount = 0;
     for (const [email, item] of seen) {
       if (existingEmails.has(email)) continue;
+      if (suppressedEmails.has(email)) { suppressedCount++; continue; }
       toCreate.push({
         listId,
         email,
@@ -348,32 +376,54 @@ export class ColdEmailService {
       });
     }
 
+    // Basic MX validation: batch-check unique domains for MX records
+    const domainSet = new Set(toCreate.map((p) => p.email.split('@')[1]));
+    const invalidDomains = new Set<string>();
+    for (const domain of domainSet) {
+      try {
+        const mx = await this.dnsResolver.resolveMx(domain);
+        if (!mx || mx.length === 0) invalidDomains.add(domain);
+      } catch {
+        invalidDomains.add(domain);
+      }
+    }
+
+    // Mark prospects with invalid domains as 'invalid', rest as 'pending'
+    const toCreateWithValidation = toCreate.map((p) => ({
+      ...p,
+      validationStatus: invalidDomains.has(p.email.split('@')[1]) ? 'invalid' as const : 'pending' as const,
+    }));
+
     let created = 0;
-    if (toCreate.length > 0) {
-      const result = await this.prisma.coldProspect.createMany({ data: toCreate, skipDuplicates: true });
+    if (toCreateWithValidation.length > 0) {
+      const result = await this.prisma.coldProspect.createMany({ data: toCreateWithValidation, skipDuplicates: true });
       created = result.count;
     }
 
-    // Update list counts
-    const counts = await this.prisma.coldProspect.groupBy({
-      by: ['validationStatus'],
-      where: { listId },
-      _count: true,
-    });
+    // Update list counts atomically to prevent drift under concurrent imports
+    let totalCount = 0;
+    await this.prisma.$transaction(async (tx) => {
+      const counts = await tx.coldProspect.groupBy({
+        by: ['validationStatus'],
+        where: { listId },
+        _count: true,
+      });
 
-    const totalCount = counts.reduce((sum: number, c: { _count: number }) => sum + c._count, 0);
-    const validCount = counts.find((c: { validationStatus: string }) => c.validationStatus === 'valid')?._count ?? 0;
-    const invalidCount = counts.find((c: { validationStatus: string }) => c.validationStatus === 'invalid')?._count ?? 0;
-    const riskyCount = counts.find((c: { validationStatus: string }) => c.validationStatus === 'risky')?._count ?? 0;
+      totalCount = counts.reduce((sum: number, c: { _count: number }) => sum + c._count, 0);
+      const validCount = counts.find((c: { validationStatus: string }) => c.validationStatus === 'valid')?._count ?? 0;
+      const invalidCount = counts.find((c: { validationStatus: string }) => c.validationStatus === 'invalid')?._count ?? 0;
+      const riskyCount = counts.find((c: { validationStatus: string }) => c.validationStatus === 'risky')?._count ?? 0;
 
-    await this.prisma.coldProspectList.update({
-      where: { id: listId },
-      data: { totalCount, validCount, invalidCount, riskyCount },
+      await tx.coldProspectList.update({
+        where: { id: listId },
+        data: { totalCount, validCount, invalidCount, riskyCount },
+      });
     });
 
     return {
       created,
-      skipped: seen.size - created,
+      skipped: seen.size - created - suppressedCount,
+      suppressed: suppressedCount,
       totalCount,
     };
   }
@@ -456,7 +506,10 @@ export class ColdEmailService {
   }
 
   async deleteCampaign(tenantId: string, id: string) {
-    await this.ensureCampaign(tenantId, id);
+    const campaign = await this.ensureCampaign(tenantId, id);
+    if (campaign.status === ColdCampaignStatus.active) {
+      throw new BadRequestException('Cannot delete an active campaign. Pause it first.');
+    }
     await this.prisma.coldCampaign.delete({ where: { id } });
     return { success: true };
   }
@@ -539,6 +592,18 @@ export class ColdEmailService {
       throw new BadRequestException('Campaign is already active');
     }
 
+    // Atomically claim: set to 'active' only if still not active (prevents double-activate)
+    const claimed = await this.prisma.coldCampaign.updateMany({
+      where: { id, status: { not: ColdCampaignStatus.active } },
+      data: { status: 'active' },
+    });
+    if (claimed.count === 0) {
+      throw new BadRequestException('Campaign is already being activated');
+    }
+
+    // If validation fails below, revert to original status
+    try {
+
     // Validate: must have at least 1 step
     const stepCount = await this.prisma.coldSequenceStep.count({ where: { campaignId: id } });
     if (stepCount === 0) {
@@ -556,14 +621,22 @@ export class ColdEmailService {
       throw new BadRequestException('Campaign must have a prospect list assigned');
     }
 
-    const suppressed = await this.prisma.suppressionEntry.findMany({ where: { tenantId }, select: { email: true } });
-    const suppressedEmails = new Set(suppressed.map((item) => item.email.toLowerCase()));
     const prospects = await this.prisma.coldProspect.findMany({
       where: {
         listId: campaign.listId,
         validationStatus: { not: 'invalid' },
       },
     });
+
+    // Batch-scoped suppression check: only query emails in this prospect list
+    const prospectEmails = prospects.map((p) => p.email.toLowerCase());
+    const suppressedEntries = prospectEmails.length > 0
+      ? await this.prisma.suppressionEntry.findMany({
+          where: { tenantId, email: { in: prospectEmails } },
+          select: { email: true },
+        })
+      : [];
+    const suppressedEmails = new Set(suppressedEntries.map((item) => item.email.toLowerCase()));
     const eligibleProspects = prospects.filter((prospect) => !suppressedEmails.has(prospect.email.toLowerCase()));
     const prospectCount = eligibleProspects.length;
     if (prospectCount === 0) {
@@ -576,10 +649,10 @@ export class ColdEmailService {
     });
     const readyMailboxes = mailboxes.filter(({ mailbox }) =>
       mailbox.status === MailboxStatus.active &&
-      (!mailbox.warmupEnabled || mailbox.warmupStatus === WarmupStatus.ready) &&
+      mailbox.warmupStatus === WarmupStatus.ready &&
       mailbox.sentToday < mailbox.dailySendLimit
     );
-    if (!readyMailboxes.length) throw new BadRequestException('Campaign requires at least one active, warmed mailbox with daily capacity');
+    if (!readyMailboxes.length) throw new BadRequestException('Campaign requires at least one active mailbox that has completed warmup and has daily capacity remaining');
 
     const steps = await this.prisma.coldSequenceStep.findMany({ where: { campaignId: id }, orderBy: { stepOrder: 'asc' } });
     const firstStep = steps[0];
@@ -598,6 +671,7 @@ export class ColdEmailService {
       queue: 'cold-email-sequences',
       name: 'cold_email.sequence.tick',
       payload: { campaignId: id },
+      required: true,
     });
 
     return this.prisma.coldCampaign.update({
@@ -607,6 +681,12 @@ export class ColdEmailService {
         totalProspects: prospectCount,
       },
     });
+
+    } catch (error) {
+      // Revert to original status if validation fails
+      await this.prisma.coldCampaign.update({ where: { id }, data: { status: campaign.status } }).catch(() => undefined);
+      throw error;
+    }
   }
 
   async sendEngineState(tenantId: string, campaignId: string) {
@@ -773,15 +853,27 @@ export class ColdEmailService {
   // ---------------------------------------------------------------------------
 
   private page(query: Record<string, string>) {
-    const page = Math.max(Number(query.page ?? 1), 1);
-    const pageSize = Math.min(Math.max(Number(query.pageSize ?? 50), 1), 100);
+    const raw = Number(query.page ?? 1);
+    const page = Number.isFinite(raw) ? Math.max(Math.floor(raw), 1) : 1;
+    const rawSize = Number(query.pageSize ?? 50);
+    const pageSize = Number.isFinite(rawSize) ? Math.min(Math.max(Math.floor(rawSize), 1), 100) : 50;
     return { skip: (page - 1) * pageSize, take: pageSize };
   }
 
   private pageMeta(query: Record<string, string>, total: number) {
-    const page = Math.max(Number(query.page ?? 1), 1);
-    const pageSize = Math.min(Math.max(Number(query.pageSize ?? 50), 1), 100);
+    const raw = Number(query.page ?? 1);
+    const page = Number.isFinite(raw) ? Math.max(Math.floor(raw), 1) : 1;
+    const rawSize = Number(query.pageSize ?? 50);
+    const pageSize = Number.isFinite(rawSize) ? Math.min(Math.max(Math.floor(rawSize), 1), 100) : 50;
     return { page, pageSize, totalPages: Math.ceil(total / pageSize) };
+  }
+
+  private readonly EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+  private requiredEmail(value: unknown, field: string) {
+    const email = this.requiredString(value, field);
+    if (!this.EMAIL_REGEX.test(email)) throw new BadRequestException(`${field} must be a valid email address`);
+    return email;
   }
 
   private requiredString(value: unknown, field: string) {
@@ -847,7 +939,7 @@ export class ColdEmailService {
   // ---------------------------------------------------------------------------
 
   async testSend(tenantId: string, campaignId: string, body: Record<string, unknown>) {
-    const email = this.requiredString(body.email, 'email');
+    const email = this.requiredEmail(body.email, 'email');
     const stepIndex = this.optionalNumber(body.stepIndex, 0) ?? 0;
     const campaign = await this.ensureCampaign(tenantId, campaignId);
     const steps = await this.prisma.coldSequenceStep.findMany({ where: { campaignId }, orderBy: { stepOrder: 'asc' } });
@@ -859,11 +951,17 @@ export class ColdEmailService {
       .replace(/\{\{lastName\}\}/g, 'User').replace(/\{\{last_name\}\}/g, 'User')
       .replace(/\{\{company\}\}/g, 'Test Company').replace(/\{\{jobTitle\}\}/g, 'CEO').replace(/\{\{job_title\}\}/g, 'CEO')
       .replace(/\{\{email\}\}/g, email);
-    const html = step.body
+    const unsubscribeUrl = `${process.env.APP_URL ?? 'https://app.example.com'}/unsubscribe?cid=${campaignId}&pid=test`;
+    let html = step.body
       .replace(/\{\{firstName\}\}/g, 'Test').replace(/\{\{first_name\}\}/g, 'Test')
       .replace(/\{\{lastName\}\}/g, 'User').replace(/\{\{last_name\}\}/g, 'User')
       .replace(/\{\{company\}\}/g, 'Test Company').replace(/\{\{jobTitle\}\}/g, 'CEO').replace(/\{\{job_title\}\}/g, 'CEO')
-      .replace(/\{\{email\}\}/g, email);
+      .replace(/\{\{email\}\}/g, email)
+      .replace(/\{\{unsubscribeUrl\}\}/g, unsubscribeUrl).replace(/\{\{unsubscribe_url\}\}/g, unsubscribeUrl);
+
+    if (!html.includes(unsubscribeUrl) && !/\{\{unsubscribe/i.test(step.body)) {
+      html += `<p style="font-size:11px;color:#999;margin-top:24px;">If you no longer wish to receive these emails, <a href="${unsubscribeUrl}" style="color:#999;">unsubscribe here</a>.</p>`;
+    }
 
     const mailboxes = await this.prisma.coldCampaignMailbox.findMany({ where: { campaignId }, include: { mailbox: true } });
     const fromEmail = mailboxes[0]?.mailbox?.email ?? 'test@example.com';
@@ -877,7 +975,7 @@ export class ColdEmailService {
   // Duplicate Campaign (Gap 8)
   // ---------------------------------------------------------------------------
 
-  async duplicateCampaign(tenantId: string, campaignId: string) {
+  async duplicateCampaign(tenantId: string, campaignId: string, userId?: string) {
     const campaign = await this.prisma.coldCampaign.findFirst({
       where: { tenantId, id: campaignId },
       include: { steps: { orderBy: { stepOrder: 'asc' } }, mailboxes: true },
@@ -890,7 +988,7 @@ export class ColdEmailService {
         status: 'draft', stopOnReply: campaign.stopOnReply, stopOnUnsubscribe: campaign.stopOnUnsubscribe,
         trackOpens: campaign.trackOpens, trackClicks: campaign.trackClicks, trackingDomain: campaign.trackingDomain,
         totalProspects: 0, sentCount: 0, openCount: 0, replyCount: 0, positiveReplyCount: 0, bounceCount: 0, unsubCount: 0,
-        createdBy: campaign.createdBy,
+        createdBy: userId ?? campaign.createdBy,
         steps: { create: campaign.steps.map((s) => ({ stepOrder: s.stepOrder, subject: s.subject, body: s.body, delayDays: s.delayDays, useThreading: s.useThreading })) },
         mailboxes: { create: campaign.mailboxes.map((m) => ({ mailboxId: m.mailboxId })) },
       },
@@ -924,9 +1022,23 @@ export class ColdEmailService {
   // SendGrid Webhook Handler (Gap 3)
   // ---------------------------------------------------------------------------
 
-  async handleSendGridWebhook(rawBody: unknown) {
+  async handleSendGridWebhook(rawBody: unknown, signature?: string, timestamp?: string) {
+    const webhookKey = process.env.SENDGRID_WEBHOOK_VERIFICATION_KEY;
+    if (webhookKey) {
+      if (!signature || !timestamp) {
+        throw new BadRequestException('Missing webhook signature headers');
+      }
+      const crypto = await import('crypto');
+      const payload = timestamp + JSON.stringify(rawBody);
+      const hash = crypto.createHmac('sha256', webhookKey).update(payload).digest('base64');
+      if (hash !== signature) {
+        throw new BadRequestException('Invalid webhook signature');
+      }
+    }
+
     const events = Array.isArray(rawBody) ? rawBody : [];
     let processed = 0;
+    let skippedDuplicate = 0;
 
     const typeMap: Record<string, string> = {
       delivered: 'delivered', open: 'opened', click: 'clicked',
@@ -945,29 +1057,58 @@ export class ColdEmailService {
       const prospectId = (customArgs.recipientId ?? customArgs.prospect_id) as string | undefined;
       if (!campaignId) continue;
 
-      const campaign = await this.prisma.coldCampaign.findUnique({ where: { id: campaignId } });
-      if (!campaign) continue;
+      // Idempotency: deduplicate by SendGrid's sg_message_id + event type
+      const sgMessageId = event?.sg_message_id as string | undefined;
+      if (sgMessageId) {
+        const existing = await this.prisma.coldEmailEvent.findFirst({
+          where: { campaignId, type: mappedType, metadata: { path: ['sg_message_id'], equals: sgMessageId } },
+        });
+        if (existing) { skippedDuplicate++; continue; }
+      }
 
-      await this.prisma.coldEmailEvent.create({
-        data: { campaignId, prospectId: prospectId ?? '', type: mappedType, metadata: event as any },
-      }).catch(() => undefined);
+      const campaign = await this.prisma.coldCampaign.findUnique({ where: { id: campaignId } });
+      if (!campaign || !campaign.tenantId) continue;
+
+      // Verify prospect belongs to this campaign's tenant (tenant isolation)
+      if (prospectId) {
+        const prospect = await this.prisma.coldProspect.findFirst({
+          where: { id: prospectId, list: { tenantId: campaign.tenantId } },
+        });
+        if (!prospect) continue;
+      }
+
+      try {
+        await this.prisma.coldEmailEvent.create({
+          data: { campaignId, prospectId: prospectId ?? '', type: mappedType, metadata: event as any },
+        });
+      } catch (err) {
+        console.error(`[WEBHOOK] Failed to create event for campaign ${campaignId}:`, err instanceof Error ? err.message : err);
+      }
 
       const counterUpdate: Record<string, any> = {};
       if (mappedType === 'opened') counterUpdate.openCount = { increment: 1 };
       if (mappedType === 'bounce') counterUpdate.bounceCount = { increment: 1 };
       if (mappedType === 'unsubscribe') counterUpdate.unsubCount = { increment: 1 };
       if (Object.keys(counterUpdate).length > 0) {
-        await this.prisma.coldCampaign.update({ where: { id: campaignId }, data: counterUpdate }).catch(() => undefined);
+        try {
+          await this.prisma.coldCampaign.update({ where: { id: campaignId }, data: counterUpdate });
+        } catch (err) {
+          console.error(`[WEBHOOK] Failed to update counters for campaign ${campaignId}:`, err instanceof Error ? err.message : err);
+        }
       }
 
       if (prospectId && (mappedType === 'bounce' || mappedType === 'unsubscribe')) {
         const prospect = await this.prisma.coldProspect.findUnique({ where: { id: prospectId } });
-        if (prospect && campaign.tenantId) {
-          await this.prisma.suppressionEntry.upsert({
-            where: { tenantId_email: { tenantId: campaign.tenantId, email: prospect.email } },
-            update: { source: mappedType === 'bounce' ? 'bounce' : 'unsubscribe' },
-            create: { tenantId: campaign.tenantId, email: prospect.email, source: mappedType === 'bounce' ? 'bounce' : 'unsubscribe' },
-          }).catch(() => undefined);
+        if (prospect) {
+          try {
+            await this.prisma.suppressionEntry.upsert({
+              where: { tenantId_email: { tenantId: campaign.tenantId, email: prospect.email } },
+              update: { source: mappedType === 'bounce' ? 'bounce' : 'unsubscribe' },
+              create: { tenantId: campaign.tenantId, email: prospect.email, source: mappedType === 'bounce' ? 'bounce' : 'unsubscribe' },
+            });
+          } catch (err) {
+            console.error(`[WEBHOOK] Failed to upsert suppression for ${prospect.email}:`, err instanceof Error ? err.message : err);
+          }
           await this.prisma.coldSequenceState.updateMany({
             where: { campaignId, prospectId, status: { in: ['queued', 'active'] } },
             data: { status: mappedType === 'bounce' ? 'bounced' : 'unsubscribed', completedAt: new Date() },
@@ -978,7 +1119,7 @@ export class ColdEmailService {
       processed++;
     }
 
-    return { processed };
+    return { processed, skippedDuplicate };
   }
 
   // ---------------------------------------------------------------------------
@@ -1021,9 +1162,7 @@ export class ColdEmailService {
 
     for (const [domain, ids] of domainMap) {
       try {
-        const records = await new Promise<dns.MxRecord[]>((resolve, reject) => {
-          dns.resolveMx(domain, (err, addresses) => err ? reject(err) : resolve(addresses));
-        });
+        const records = await this.dnsResolver.resolveMx(domain);
         const status = records && records.length > 0 ? 'valid' : 'risky';
         await this.prisma.coldProspect.updateMany({ where: { id: { in: ids } }, data: { validationStatus: status } });
       } catch {
@@ -1072,38 +1211,134 @@ export class ColdEmailService {
 
   async searchEmailFinder(tenantId: string, body: Record<string, unknown>) {
     const credential = await this.prisma.emailFinderCredential.findFirst({ where: { tenantId, isActive: true } });
-    if (!credential) throw new BadRequestException('No email finder API key configured. Go to Settings > Integrations to add one.');
+    if (!credential) throw new BadRequestException('No email finder API key configured.');
     const apiKey = this.encryption.decrypt(credential.apiKeyCipher);
 
+    const mode = typeof body.mode === 'string' ? body.mode : 'search';
     const titles = typeof body.titles === 'string' ? body.titles.split(',').map((t: string) => t.trim()).filter(Boolean) : Array.isArray(body.titles) ? body.titles : [];
     const domain = this.optionalString(body.domain);
     const companyName = this.optionalString(body.companyName);
     const locations = typeof body.locations === 'string' ? body.locations.split(',').map((l: string) => l.trim()).filter(Boolean) : Array.isArray(body.locations) ? body.locations : [];
     const perPage = this.optionalNumber(body.perPage, 25) ?? 25;
 
-    const searchBody: Record<string, unknown> = { per_page: Math.min(perPage, 100) };
-    if (titles.length > 0) searchBody.person_titles = titles;
-    if (domain) searchBody.q_organization_domains = domain;
-    if (companyName) searchBody.q_organization_name = companyName;
-    if (locations.length > 0) searchBody.person_locations = locations;
+    // Mode: "enrich" — get full email for specific Apollo person IDs
+    if (mode === 'enrich') {
+      return this.apolloEnrichPeople(tenantId, apiKey, credential.id, body);
+    }
 
-    try {
-      const response = await fetch('https://api.apollo.io/api/v1/mixed_people/search', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
-        body: JSON.stringify(searchBody),
-      });
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new BadRequestException(`Apollo API error: ${response.status} ${errorText.slice(0, 200)}`);
+    // Build query string for api_search (free endpoint — uses query params per OpenAPI spec)
+    const qp = new URLSearchParams();
+    qp.set('per_page', String(Math.min(perPage, 100)));
+    if (titles.length > 0) titles.forEach(t => qp.append('person_titles[]', t));
+    if (domain) qp.append('q_organization_domains_list[]', domain);
+    if (locations.length > 0) locations.forEach(l => qp.append('person_locations[]', l));
+    if (companyName) qp.set('q_keywords', companyName);
+    const apiSearchUrl = `https://api.apollo.io/api/v1/mixed_people/api_search?${qp.toString()}`;
+
+    // JSON body for paid endpoints
+    const jsonBody: Record<string, unknown> = { per_page: Math.min(perPage, 100) };
+    if (titles.length > 0) jsonBody.person_titles = titles;
+    if (domain) jsonBody.q_organization_domains = domain;
+    if (companyName) jsonBody.q_organization_name = companyName;
+    if (locations.length > 0) jsonBody.person_locations = locations;
+
+    const endpoints = [
+      { url: apiSearchUrl, isApiSearch: true },
+      { url: 'https://api.apollo.io/api/v1/people/search', isApiSearch: false },
+      { url: 'https://api.apollo.io/api/v1/mixed_people/search', isApiSearch: false },
+    ];
+
+    for (const ep of endpoints) {
+      try {
+        const fetchOptions: RequestInit = {
+          method: 'POST',
+          headers: { 'x-api-key': apiKey } as Record<string, string>,
+        };
+        if (!ep.isApiSearch) {
+          (fetchOptions.headers as Record<string, string>)['Content-Type'] = 'application/json';
+          fetchOptions.body = JSON.stringify(jsonBody);
+        }
+
+        const response = await fetch(ep.url, fetchOptions);
+
+        if (response.status === 403 || response.status === 401) continue;
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new BadRequestException(`Apollo API error: ${response.status} ${errorText.slice(0, 200)}`);
+        }
+
+        const data = await response.json();
+        await this.prisma.emailFinderCredential.update({ where: { id: credential.id }, data: { lastUsedAt: new Date() } });
+
+        const people = data.people ?? [];
+        const isApiSearch = ep.isApiSearch;
+
+        await this.prisma.providerLog.create({
+          data: { tenantId, provider: 'apollo', operation: isApiSearch ? 'api_search' : 'people_search', status: 'success', request: { endpoint: ep.url } as any, response: { count: people.length } },
+        }).catch(() => undefined);
+
+        // api_search returns obfuscated data (no emails, partial last names)
+        const results = people.map((p: any) => ({
+          apolloId: p.id ?? null,
+          firstName: p.first_name ?? '',
+          lastName: isApiSearch ? (p.last_name_obfuscated ?? p.last_name ?? '') : (p.last_name ?? ''),
+          email: isApiSearch ? null : (p.email ?? null),
+          title: p.title ?? '',
+          companyName: p.organization?.name ?? '',
+          emailStatus: isApiSearch ? (p.has_email ? 'available' : 'unavailable') : (p.email_status ?? 'unavailable'),
+          linkedinUrl: p.linkedin_url ?? null,
+          city: p.city ?? null,
+          country: p.country ?? null,
+          hasEmail: p.has_email ?? false,
+          needsEnrichment: isApiSearch,
+        }));
+
+        return {
+          results,
+          totalCount: data.total_entries ?? data.pagination?.total_entries ?? people.length,
+          mode: isApiSearch ? 'api_search' : 'search',
+        };
+      } catch (error) {
+        if (error instanceof BadRequestException) throw error;
+        continue;
       }
-      const data = await response.json();
-      await this.prisma.emailFinderCredential.update({ where: { id: credential.id }, data: { lastUsedAt: new Date() } });
-      await this.prisma.providerLog.create({
-        data: { tenantId, provider: 'apollo', operation: 'people_search', status: 'success', request: searchBody as any, response: { count: data.people?.length ?? 0 } },
-      }).catch(() => undefined);
+    }
 
-      const results = (data.people ?? []).map((p: any) => ({
+    throw new BadRequestException(
+      'All Apollo search endpoints failed. Make sure you are using a Master API key (not a regular key). Create one at Apollo → Settings → Integrations → API Keys.',
+    );
+  }
+
+  // Enrich specific Apollo person IDs to reveal emails (costs credits)
+  private async apolloEnrichPeople(tenantId: string, apiKey: string, credentialId: string, body: Record<string, unknown>) {
+    const ids = Array.isArray(body.apolloIds) ? body.apolloIds as string[] : [];
+    if (ids.length === 0) throw new BadRequestException('No person IDs provided for enrichment');
+
+    const results: any[] = [];
+    for (const id of ids.slice(0, 25)) {
+      try {
+        const response = await fetch('https://api.apollo.io/api/v1/people/match', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
+          body: JSON.stringify({ id, reveal_personal_emails: false }),
+        });
+        if (!response.ok) continue;
+        const data = await response.json();
+        if (data.person) results.push(data.person);
+      } catch {
+        continue;
+      }
+    }
+
+    await this.prisma.emailFinderCredential.update({ where: { id: credentialId }, data: { lastUsedAt: new Date() } });
+    await this.prisma.providerLog.create({
+      data: { tenantId, provider: 'apollo', operation: 'people_enrich', status: 'success', request: { count: ids.length } as any, response: { enriched: results.length } },
+    }).catch(() => undefined);
+
+    return {
+      results: results.map((p: any) => ({
+        apolloId: p.id ?? null,
         firstName: p.first_name ?? '',
         lastName: p.last_name ?? '',
         email: p.email ?? null,
@@ -1113,16 +1348,12 @@ export class ColdEmailService {
         linkedinUrl: p.linkedin_url ?? null,
         city: p.city ?? null,
         country: p.country ?? null,
-      }));
-
-      return { results, totalCount: data.pagination?.total_entries ?? results.length };
-    } catch (error) {
-      if (error instanceof BadRequestException) throw error;
-      await this.prisma.providerLog.create({
-        data: { tenantId, provider: 'apollo', operation: 'people_search', status: 'failed', request: searchBody as any, error: error instanceof Error ? error.message : String(error) },
-      }).catch(() => undefined);
-      throw new BadRequestException(`Email finder search failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
+        hasEmail: !!p.email,
+        needsEnrichment: false,
+      })),
+      totalCount: results.length,
+      mode: 'enriched',
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -1224,7 +1455,7 @@ export class ColdEmailService {
       data: {
         tenantId, title: `Deal from ${reply.fromEmail}`,
         value: 0, currency: 'USD', stage: 'New', status: 'open',
-        createdBy: userId,
+        assignedTo: userId, probability: 10,
       },
     });
     await this.prisma.coldReply.update({ where: { id: replyId }, data: { crmDealId: deal.id, respondedAt: new Date() } });
@@ -1326,7 +1557,7 @@ export class ColdEmailService {
       id: i.id,
       platformKey: i.platformKey,
       isActive: i.isActive,
-      connectedAt: i.createdAt,
+      connectedAt: i.addedAt,
       maskedKey: '****' + this.encryption.decrypt(i.apiKeyCipher).slice(-4),
     }));
   }
@@ -1342,9 +1573,9 @@ export class ColdEmailService {
     const integration = await this.prisma.tenantIntegration.upsert({
       where: { id: `${tenantId}_${platformKey}` },
       update: { apiKeyCipher, isActive: true },
-      create: { tenantId, platformKey, apiKeyCipher, isActive: true },
+      create: { id: `${tenantId}_${platformKey}`, tenantId, platformKey, apiKeyCipher, isActive: true, monthlyPrice: 0 },
     });
-    return { id: integration.id, platformKey, isActive: true, connectedAt: integration.createdAt };
+    return { id: integration.id, platformKey, isActive: true, connectedAt: integration.addedAt };
   }
 
   async disconnectIntegration(tenantId: string, platformKey: string) {

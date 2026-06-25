@@ -107,6 +107,7 @@ enum ColdCampaignStatus {
 
 enum ColdProspectStatus {
   queued
+  processing
   active
   replied
   interested
@@ -170,6 +171,13 @@ enum SuppressionSource {
   bounce
   complaint
   import
+}
+
+enum EmailLinkPurpose {
+  unsubscribe
+  preferences
+  view
+  opt_in
 }
 
 enum BillingSubscriptionStatus {
@@ -440,6 +448,7 @@ model Contact {
   assignedTo     String?
   status         ContactStatus @default(lead)
   source         ContactSource @default(manual)
+  interestedServices String[]  @default([])
   tags           String[]      @default([])
   marketingConsent Boolean     @default(false)
   marketingConsentSource String?
@@ -491,6 +500,7 @@ model Deal {
   assignedTo        String
   status            DealStatus @default(open)
   probability       Int
+  interestedServices String[]  @default([])
   expectedCloseDate DateTime?
   createdAt         DateTime   @default(now())
   updatedAt         DateTime   @updatedAt
@@ -604,6 +614,7 @@ model EmailCampaign {
   sentAt          DateTime?
   cancelledAt     DateTime?
   completedAt     DateTime?
+  sendContinuationAt DateTime?
   lastError       String?
   sendJobId       String?
   recipientFilter Json?
@@ -1404,13 +1415,16 @@ model UnsubscribeToken {
   tenantId    String
   email       String
   tokenHash   String   @unique
+  purpose     EmailLinkPurpose @default(unsubscribe)
   campaignId  String?
   coldCampaignId String?
+  recipientId String?
   usedAt      DateTime?
   expiresAt   DateTime?
   createdAt   DateTime @default(now())
 
   @@index([tenantId, email])
+  @@index([purpose, campaignId, recipientId])
 }
 
 model SubscriptionPreference {
@@ -1452,6 +1466,7 @@ model ScheduledReport {
   enabled     Boolean  @default(true)
   lastSentAt  DateTime?
   nextSendAt  DateTime?
+  lastError   String?
   createdBy   String
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -1721,6 +1736,7 @@ model ColdSequenceState {
   prospectId      String
   currentStepId   String?
   status          ColdProspectStatus @default(queued)
+  processingStartedAt DateTime?
   lastSentAt      DateTime?
   nextSendAfter   DateTime?
   completedAt     DateTime?
@@ -2049,6 +2065,8 @@ model ColdSequenceTemplate {
   createdBy   String
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+
+  @@index([tenantId, createdAt])
 }
 
 model CallSession {

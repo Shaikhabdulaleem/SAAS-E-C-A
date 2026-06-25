@@ -81,7 +81,8 @@ export function SendingDomains() {
     try {
       const result = await apiRequest<SendingDomain[]>('/cold-email/domains');
       setDomains(result);
-    } catch {
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Operation failed');
     } finally {
       setLoading(false);
     }
@@ -143,7 +144,8 @@ export function SendingDomains() {
     try {
       const updated = await apiRequest<SendingDomain>(`/cold-email/domains/${domainId}/verify`, { method: 'POST' });
       setDomains(prev => prev.map(d => d.id === domainId ? updated : d));
-    } catch {
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Operation failed');
     } finally {
       setVerifying(null);
     }
@@ -184,7 +186,8 @@ export function SendingDomains() {
     try {
       await apiRequest(`/cold-email/domains/${domainId}`, { method: 'DELETE' });
       setDomains(prev => prev.filter(d => d.id !== domainId));
-    } catch {
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Operation failed');
     }
   };
 

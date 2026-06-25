@@ -8,12 +8,12 @@ import type { ServiceKey } from "./contexts/TenantContext";
 import { Login } from "./pages/Login";
 import { InviteAccept } from "./pages/InviteAccept";
 import { Dashboard } from "./pages/Dashboard";
-import { Contacts } from "./pages/crm/Contacts";
+import { ContactsAndCompanies } from "./pages/crm/ContactsAndCompanies";
 import { ContactDetail } from "./pages/crm/ContactDetail";
-import { Companies } from "./pages/crm/Companies";
 import { CompanyDetail } from "./pages/crm/CompanyDetail";
 import { Deals } from "./pages/crm/Deals";
 import { DealDetail } from "./pages/crm/DealDetail";
+import { CrmSettings } from "./pages/crm/CrmSettings";
 import { Campaigns } from "./pages/email/Campaigns";
 import { CampaignDetail } from "./pages/email/CampaignDetail";
 import { Templates } from "./pages/email/Templates";
@@ -90,12 +90,12 @@ export const router = createBrowserRouter([
     Component: ProtectedLayout,
     children: [
       { index: true, Component: Dashboard },
-      { path: "contacts", element: withService("crm", <Contacts />) },
+      { path: "contacts", element: withService("crm", <ContactsAndCompanies />) },
       { path: "contacts/:id", element: withService("crm", <ContactDetail />) },
-      { path: "companies", element: withService("crm", <Companies />) },
       { path: "companies/:id", element: withService("crm", <CompanyDetail />) },
       { path: "deals", element: withService("crm", <Deals />) },
       { path: "deals/:id", element: withService("crm", <DealDetail />) },
+      { path: "crm/settings", element: withService("crm", <CrmSettings />) },
       { path: "proposals", element: withService("proposals", <ProposalList />) },
       { path: "proposals/create", element: withService("proposals", <ProposalCreate />) },
       { path: "proposals/:id", element: withService("proposals", <ProposalDetail />) },

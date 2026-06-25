@@ -4,7 +4,7 @@ import IORedis from 'ioredis';
 import { CampaignStatus, DnsRecordStatus, EmailEventType, JobStatus, PrismaClient } from '@prisma/client';
 import { createHash, createCipheriv, createDecipheriv, randomBytes } from 'crypto';
 import { Resolver } from 'dns/promises';
-import { renderEmailWithTracking, resolveSelectedVariant, resolveVariantById, getVariantIds, htmlToPlainText } from './email/email-rendering';
+import { contentQaWarnings, renderEmailWithTracking, resolveSelectedVariant, resolveVariantById, getVariantIds, htmlToPlainText } from './email/email-rendering';
 import { sendViaSendGrid } from './providers/services/email-delivery.util';
 
 const redisUrl = process.env.REDIS_URL;
@@ -38,9 +38,17 @@ async function processEmailCampaign(data: Record<string, unknown>) {
   const effectiveLimit = Math.min(campaign.dailySendLimit ?? 5000, domainRemaining);
 
   if (effectiveLimit <= 0) {
+    const continuationAt = new Date(Date.now() + 86400000);
+    await prisma.emailCampaign.update({
+      where: { id: campaignId },
+      data: {
+        sendContinuationAt: continuationAt,
+        lastError: `Domain daily cap reached (${domainCap}/day). Sending will resume tomorrow.`,
+      },
+    });
     console.warn(`[WARMUP] Domain ${senderDomain} daily cap reached (${domainCap}). Re-enqueueing campaign ${campaignId} for tomorrow.`);
     const queue = new (await import('bullmq')).Queue('email-campaigns', { connection: connection as never });
-    await queue.add('email.campaign.resume', { campaignId }, { delay: 86400000 });
+    await queue.add('email.campaign.resume', { campaignId }, { delay: Math.max(0, continuationAt.getTime() - Date.now()) });
     await queue.close();
     return { processed: true, sent: 0, reason: 'domain daily cap reached, re-enqueued for tomorrow' };
   }
@@ -195,6 +203,7 @@ async function processEmailCampaign(data: Record<string, unknown>) {
       status: nextStatus,
       sentAt: nextStatus === CampaignStatus.sent || nextStatus === CampaignStatus.partial_failed ? new Date() : undefined,
       completedAt: nextStatus === CampaignStatus.sent || nextStatus === CampaignStatus.partial_failed ? new Date() : undefined,
+      sendContinuationAt: remaining > 0 ? new Date(Date.now() + 86400000) : null,
       lastError: remaining > 0
         ? `Sent ${sent} today (domain cap: ${domainCap}/day). ${remaining} recipients will be sent tomorrow.`
         : permanentFailures > 0 ? `${permanentFailures} recipients failed` : null,
@@ -211,6 +220,25 @@ async function processEmailCampaign(data: Record<string, unknown>) {
   return { processed: true, sent, failed, remaining };
 }
 
+async function reenqueueColdCampaign(campaignId: string, delayMs = 30 * 60 * 1000) {
+  const queue = new (await import('bullmq')).Queue('cold-email-sequences', { connection: connection as never });
+  await queue.add('tick', { campaignId }, { delay: delayMs, jobId: `cold:${campaignId}:${Math.floor((Date.now() + delayMs) / 60000)}` });
+  await queue.close();
+}
+
+function zonedSendTime(timeZone = process.env.OUTREACH_SEND_TIMEZONE ?? 'UTC') {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hour12: false,
+    weekday: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).formatToParts(new Date());
+  const value = (type: string) => parts.find((part) => part.type === type)?.value ?? '';
+  const weekday = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(value('weekday'));
+  return { current: Number(`${value('hour')}${value('minute')}`), weekday: weekday < 0 ? new Date().getUTCDay() : weekday };
+}
+
 async function processColdSequenceTick(data: Record<string, unknown>) {
   const campaignId = (data.campaignId ?? (data.payload as any)?.campaignId) as string | undefined;
   if (!campaignId) return { skipped: true };
@@ -218,12 +246,22 @@ async function processColdSequenceTick(data: Record<string, unknown>) {
     where: { id: campaignId },
     include: {
       steps: { orderBy: { stepOrder: 'asc' } },
-      mailboxes: { include: { mailbox: true } },
+      mailboxes: { include: { mailbox: { include: { domain: true } } } },
     },
   });
   if (!campaign || campaign.status !== 'active') return { skipped: true, reason: 'campaign not active' };
   if (campaign.steps.length === 0) return { skipped: true, reason: 'no steps' };
 
+  await prisma.coldSequenceState.updateMany({
+    where: {
+      campaignId,
+      status: 'processing',
+      processingStartedAt: { lt: new Date(Date.now() - 30 * 60 * 1000) },
+    },
+    data: { status: 'active', processingStartedAt: null, nextSendAfter: new Date() },
+  });
+
+  const BATCH_SIZE = 10;
   const pendingStates = await prisma.coldSequenceState.findMany({
     where: {
       campaignId,
@@ -231,32 +269,41 @@ async function processColdSequenceTick(data: Record<string, unknown>) {
       nextSendAfter: { lte: new Date() },
     },
     include: { prospect: true },
-    take: 50,
+    take: BATCH_SIZE,
   });
   if (pendingStates.length === 0) return { processed: true, sent: 0 };
 
-  const suppressedEmails = new Set(
-    (await prisma.suppressionEntry.findMany({
-      where: { tenantId: campaign.tenantId ?? undefined },
-      select: { email: true },
-    })).map((s) => s.email.toLowerCase()),
-  );
+  // Paginated suppression check instead of loading entire set into memory
+  const prospectEmails = pendingStates
+    .filter((s) => s.prospect)
+    .map((s) => s.prospect!.email.toLowerCase());
+  const suppressedEntries = await prisma.suppressionEntry.findMany({
+    where: { tenantId: campaign.tenantId ?? undefined, email: { in: prospectEmails } },
+    select: { email: true },
+  });
+  const suppressedEmails = new Set(suppressedEntries.map((s) => s.email.toLowerCase()));
 
   const activeMailboxes = campaign.mailboxes
     .map((m) => m.mailbox)
-    .filter((mb) => mb.status === 'active' && mb.sentToday < mb.dailySendLimit);
+    .filter((mb) => mb.status === 'active');
 
-  if (activeMailboxes.length === 0) return { processed: true, sent: 0, reason: 'no available mailboxes' };
+  if (activeMailboxes.length === 0) {
+    await reenqueueColdCampaign(campaignId);
+    return { processed: true, sent: 0, reason: 'no available mailboxes' };
+  }
 
   const now = new Date();
-  const currentHour = now.getUTCHours();
+  const sendTime = zonedSendTime();
   const sendableMailboxes = activeMailboxes.filter((mb) => {
     const start = parseInt(mb.sendWindowStart?.replace(':', '') ?? '0800', 10);
     const end = parseInt(mb.sendWindowEnd?.replace(':', '') ?? '1700', 10);
-    const current = currentHour * 100;
-    return current >= start && current <= end;
+    if (mb.sendWeekdaysOnly && (sendTime.weekday === 0 || sendTime.weekday === 6)) return false;
+    return sendTime.current >= start && sendTime.current <= end;
   });
-  if (sendableMailboxes.length === 0) return { processed: true, sent: 0, reason: 'outside send window' };
+  if (sendableMailboxes.length === 0) {
+    await reenqueueColdCampaign(campaignId, 60 * 60 * 1000);
+    return { processed: true, sent: 0, reason: 'outside send window' };
+  }
 
   let mailboxIndex = 0;
   let sent = 0;
@@ -278,6 +325,9 @@ async function processColdSequenceTick(data: Record<string, unknown>) {
     }
   }
 
+  // Track domain daily caps in memory for this batch
+  const domainSentMap = new Map<string, number>();
+
   for (const state of pendingStates) {
     const prospect = state.prospect;
     if (!prospect) continue;
@@ -296,13 +346,46 @@ async function processColdSequenceTick(data: Record<string, unknown>) {
       continue;
     }
 
+    const claimed = await prisma.coldSequenceState.updateMany({
+      where: { id: state.id, status: { in: ['queued', 'active'] }, currentStepId: state.currentStepId },
+      data: { status: 'processing', processingStartedAt: now },
+    });
+    if (claimed.count === 0) continue;
+
     const mailbox = sendableMailboxes[mailboxIndex % sendableMailboxes.length];
-    if (mailbox.sentToday >= mailbox.dailySendLimit) continue;
+
+    // Check mailbox daily limit from DB (not stale in-memory value)
+    const freshMailbox = await prisma.coldMailbox.findUnique({ where: { id: mailbox.id }, select: { sentToday: true, dailySendLimit: true } });
+    if (!freshMailbox || freshMailbox.sentToday >= freshMailbox.dailySendLimit) {
+      await prisma.coldSequenceState.update({ where: { id: state.id }, data: { status: 'active', processingStartedAt: null, nextSendAfter: new Date(Date.now() + 30 * 60 * 1000) } });
+      await reenqueueColdCampaign(campaignId);
+      continue;
+    }
+
+    // Use the domain from the original campaign query (includes domain: true), not the re-fetched mailbox
+    const domain = (mailbox as any).domain as { id: string; currentDailyCap: number | null } | null;
+    if (domain) {
+      if (!domainSentMap.has(domain.id)) {
+        const freshDomain = await prisma.sendingDomain.findUnique({ where: { id: domain.id }, select: { sentToday: true, currentDailyCap: true } });
+        domainSentMap.set(domain.id, freshDomain?.sentToday ?? 0);
+      }
+      const domainSent = domainSentMap.get(domain.id)!;
+      const domainCap = domain.currentDailyCap ?? 50;
+      if (domainSent >= domainCap) {
+        await prisma.coldSequenceState.update({ where: { id: state.id }, data: { status: 'active', processingStartedAt: null, nextSendAfter: new Date(Date.now() + 60 * 60 * 1000) } });
+        continue;
+      }
+    }
+
     mailboxIndex++;
 
     const senderName = mailbox.fromName ?? mailbox.email.split('@')[0];
     const senderFirstName = senderName.split(' ')[0] ?? senderName;
     const senderLastName = senderName.split(' ').slice(1).join(' ') ?? '';
+
+    // Build unsubscribe URL
+    const unsubscribeUrl = `${process.env.APP_URL ?? 'https://app.example.com'}/unsubscribe?cid=${campaignId}&pid=${state.prospectId}`;
+
     const renderTemplate = (text: string) =>
       text
         .replace(/\{\{firstName\}\}/g, prospect.firstName ?? '')
@@ -317,12 +400,19 @@ async function processColdSequenceTick(data: Record<string, unknown>) {
         .replace(/\{\{senderFirstName\}\}/g, senderFirstName)
         .replace(/\{\{senderLastName\}\}/g, senderLastName)
         .replace(/\{\{senderName\}\}/g, senderName)
-        .replace(/\{\{senderEmail\}\}/g, mailbox.email);
+        .replace(/\{\{senderEmail\}\}/g, mailbox.email)
+        .replace(/\{\{unsubscribeUrl\}\}/g, unsubscribeUrl)
+        .replace(/\{\{unsubscribe_url\}\}/g, unsubscribeUrl);
 
     const subject = renderTemplate(currentStep.subject ?? '');
     const rawBody = renderTemplate(currentStep.body);
-    const coldRendered = await renderEmailWithTracking({ store: prisma, body: rawBody, tenantId: campaign.tenantId ?? '', campaignId, recipientId: state.prospectId, email: prospect.email, trackOpens: campaign.trackOpens, trackClicks: campaign.trackClicks });
-    const body = coldRendered?.html ?? rawBody;
+
+    // Auto-append unsubscribe footer if not already present
+    const hasUnsubLink = rawBody.includes(unsubscribeUrl) || /\{\{unsubscribe/i.test(currentStep.body);
+    const bodyWithUnsub = hasUnsubLink ? rawBody : `${rawBody}<p style="font-size:11px;color:#999;margin-top:24px;">If you no longer wish to receive these emails, <a href="${unsubscribeUrl}" style="color:#999;">unsubscribe here</a>.</p>`;
+
+    const coldRendered = await renderEmailWithTracking({ store: prisma, body: bodyWithUnsub, tenantId: campaign.tenantId ?? '', campaignId, recipientId: state.prospectId, email: prospect.email, trackOpens: campaign.trackOpens, trackClicks: campaign.trackClicks });
+    const body = coldRendered?.html ?? bodyWithUnsub;
 
     try {
       await sendViaSendGrid({
@@ -337,63 +427,104 @@ async function processColdSequenceTick(data: Record<string, unknown>) {
         replyTo: mailbox.replyToEmail,
       }, prisma);
 
-      await prisma.coldEmailEvent.create({
-        data: { campaignId, prospectId: state.prospectId, type: 'sent', stepOrder: currentStep.stepOrder, metadata: {} },
-      }).catch(() => undefined);
+      // Atomic post-send updates: event + state + counters
+      await prisma.$transaction(async (tx) => {
+        await tx.coldEmailEvent.create({
+          data: { campaignId, prospectId: state.prospectId, type: 'sent', stepOrder: currentStep.stepOrder, metadata: {} },
+        });
+
+        const nextStep = campaign.steps.find((s) => s.stepOrder > currentStep.stepOrder);
+        if (nextStep) {
+          await tx.coldSequenceState.update({
+            where: { id: state.id },
+            data: {
+              currentStepId: nextStep.id,
+              status: 'active',
+              processingStartedAt: null,
+              lastSentAt: now,
+              nextSendAfter: new Date(now.getTime() + (nextStep.delayDays ?? 2) * 86400000),
+            },
+          });
+        } else {
+          await tx.coldSequenceState.update({
+            where: { id: state.id },
+            data: { status: 'completed', processingStartedAt: null, lastSentAt: now, completedAt: now },
+          });
+        }
+
+        await tx.coldMailbox.update({ where: { id: mailbox.id }, data: { sentToday: { increment: 1 }, totalSent: { increment: 1 } } });
+        await tx.coldCampaign.update({ where: { id: campaignId }, data: { sentCount: { increment: 1 } } });
+
+        if (domain) {
+          await tx.sendingDomain.update({ where: { id: domain.id }, data: { sentToday: { increment: 1 } } });
+        }
+      });
+
+      // Update in-memory domain tracking
+      if (domain) {
+        domainSentMap.set(domain.id, (domainSentMap.get(domain.id) ?? 0) + 1);
+      }
 
       const persona = await prisma.persona.findFirst({ where: { mailboxId: mailbox.id } });
       if (persona) {
-        await prisma.sendingLog.create({
-          data: { personaId: persona.id, mailboxId: mailbox.id, campaignId, prospectId: state.prospectId, sentAt: now, status: 'sent' },
-        }).catch(() => undefined);
+        try {
+          await prisma.sendingLog.create({
+            data: { personaId: persona.id, mailboxId: mailbox.id, campaignId, prospectId: state.prospectId, sentAt: now, status: 'sent' },
+          });
+        } catch (logErr) {
+          console.error(`[COLD_SEND] Failed to create sending log for prospect ${state.prospectId}:`, logErr instanceof Error ? logErr.message : logErr);
+        }
       }
 
-      const nextStep = campaign.steps.find((s) => s.stepOrder > currentStep.stepOrder);
-      if (nextStep) {
-        await prisma.coldSequenceState.update({
-          where: { id: state.id },
-          data: {
-            currentStepId: nextStep.id,
-            status: 'active',
-            lastSentAt: now,
-            nextSendAfter: new Date(now.getTime() + (nextStep.delayDays ?? 2) * 86400000),
-          },
-        });
-      } else {
-        await prisma.coldSequenceState.update({
-          where: { id: state.id },
-          data: { status: 'completed', lastSentAt: now, completedAt: now },
-        });
-      }
-
-      await prisma.coldMailbox.update({ where: { id: mailbox.id }, data: { sentToday: { increment: 1 }, totalSent: { increment: 1 } } });
-      mailbox.sentToday++;
-      await prisma.coldCampaign.update({ where: { id: campaignId }, data: { sentCount: { increment: 1 } } });
       sent++;
     } catch (error) {
       failed++;
-      await prisma.providerLog.create({
-        data: {
-          tenantId: campaign.tenantId ?? '',
-          provider: 'sendgrid',
-          operation: 'cold_email_send',
-          status: 'failed',
-          request: { to: prospect.email, campaignId },
-          error: error instanceof Error ? error.message : String(error),
-        },
-      }).catch(() => undefined);
+      try {
+        await prisma.coldSequenceState.update({
+          where: { id: state.id },
+          data: {
+            status: 'active',
+            processingStartedAt: null,
+            nextSendAfter: new Date(Date.now() + 30 * 60 * 1000),
+          },
+        });
+      } catch (stateErr) {
+        console.error(`[COLD_SEND] Failed to revert state for ${state.id}:`, stateErr instanceof Error ? stateErr.message : stateErr);
+      }
+      try {
+        await prisma.providerLog.create({
+          data: {
+            tenantId: campaign.tenantId ?? '',
+            provider: 'sendgrid',
+            operation: 'cold_email_send',
+            status: 'failed',
+            request: { to: prospect.email, campaignId },
+            error: error instanceof Error ? error.message : String(error),
+          },
+        });
+      } catch (logErr) {
+        console.error(`[COLD_SEND] Failed to log send failure:`, logErr instanceof Error ? logErr.message : logErr);
+      }
     }
-
-    const delay = (mailbox.minDelaySeconds ?? 60) + Math.random() * ((mailbox.maxDelaySeconds ?? 180) - (mailbox.minDelaySeconds ?? 60));
-    await new Promise((r) => setTimeout(r, delay * 1000));
   }
 
+  // Re-enqueue with BullMQ delay instead of blocking with setTimeout
   const remaining = await prisma.coldSequenceState.count({
     where: { campaignId, status: { in: ['queued', 'active'] } },
   });
   if (remaining > 0) {
+    let delayMs: number;
+    if (sent === 0) {
+      // No sends happened this tick — all mailboxes likely at capacity or outside window
+      // Back off to 30 minutes instead of spinning every 60 seconds
+      delayMs = 30 * 60 * 1000;
+    } else {
+      const minDelay = sendableMailboxes[0]?.minDelaySeconds ?? 60;
+      const maxDelay = sendableMailboxes[0]?.maxDelaySeconds ?? 180;
+      delayMs = Math.max((minDelay + Math.random() * (maxDelay - minDelay)) * 1000, 60000);
+    }
     const queue = new (await import('bullmq')).Queue('cold-email-sequences', { connection: connection as never });
-    await queue.add('tick', { campaignId }, { delay: 180000 });
+    await queue.add('tick', { campaignId }, { delay: delayMs });
     await queue.close();
   } else {
     await prisma.coldCampaign.update({ where: { id: campaignId }, data: { status: 'completed' } });
@@ -1039,7 +1170,11 @@ async function processSystemCron(_data: Record<string, unknown>) {
           return records.some(r => r.join('').includes('v=DMARC1'));
         }).catch(() => false);
         score += hasDmarc ? 25 : 0;
-        score += 25; // DKIM assumed if other records present
+        const dkimSelector = (domain as any).dkimSelector ?? 'default';
+        const hasDkim = await dnsResolver.resolveTxt(`${dkimSelector}._domainkey.${domain.domain}`).then(records => {
+          return records.some(r => r.join('').includes('v=DKIM1') || r.join('').includes('k=rsa'));
+        }).catch(() => false);
+        score += hasDkim ? 25 : 0;
         await prisma.sendingDomain.update({ where: { id: domain.id }, data: {
           healthScore: Math.min(score, 100),
           spfStatus: hasTxt ? 'verified' : 'not_set',
@@ -1092,7 +1227,11 @@ async function processSystemCron(_data: Record<string, unknown>) {
   // 5b. Recover email marketing campaigns stuck in 'sending' for > 30 minutes
   const stuckCutoff = new Date(now.getTime() - 30 * 60 * 1000);
   const stuckCampaigns = await prisma.emailCampaign.findMany({
-    where: { status: CampaignStatus.sending, updatedAt: { lt: stuckCutoff } },
+    where: {
+      status: CampaignStatus.sending,
+      updatedAt: { lt: stuckCutoff },
+      OR: [{ sendContinuationAt: null }, { sendContinuationAt: { lte: now } }],
+    },
   });
   for (const sc of stuckCampaigns) {
     const remaining = await prisma.campaignRecipient.count({ where: { campaignId: sc.id, status: 'queued' } });
@@ -1180,24 +1319,61 @@ async function processSystemCron(_data: Record<string, unknown>) {
       ).join('');
       const html = `<h2>Email Marketing Report — ${report.name}</h2><table style="width:100%;border-collapse:collapse;font-family:Arial,sans-serif;font-size:14px"><thead><tr style="background:#f4f4f4"><th style="padding:8px;text-align:left">Campaign</th><th style="padding:8px;text-align:right">Recipients</th><th style="padding:8px;text-align:right">Open Rate</th><th style="padding:8px;text-align:right">Click Rate</th></tr></thead><tbody>${rows || '<tr><td colspan="4" style="padding:16px;text-align:center;color:#999">No campaigns to report</td></tr>'}</tbody></table>`;
       const domain = await prisma.sendingDomain.findFirst({ where: { tenantId: report.tenantId } });
+      let delivered = 0;
+      let lastError: string | null = null;
       for (const to of report.recipients) {
-        await sendViaSendGrid({ tenantId: report.tenantId, to, fromEmail: `reports@${domain?.domain ?? 'example.com'}`, fromName: 'Email Marketing Reports', subject: `${report.name} — ${now.toLocaleDateString()}`, html }, prisma).catch(() => undefined);
+        try {
+          await sendViaSendGrid({ tenantId: report.tenantId, to, fromEmail: `reports@${domain?.domain ?? 'example.com'}`, fromName: 'Email Marketing Reports', subject: `${report.name} - ${now.toLocaleDateString()}`, html }, prisma);
+          delivered++;
+        } catch (error) {
+          lastError = error instanceof Error ? error.message : String(error);
+        }
+      }
+      if (delivered === 0) {
+        await prisma.scheduledReport.update({ where: { id: report.id }, data: { lastError: lastError ?? 'No report recipients were delivered' } });
+        continue;
       }
       const delayMs = report.frequency === 'daily' ? 86400000 : report.frequency === 'weekly' ? 7 * 86400000 : 30 * 86400000;
-      await prisma.scheduledReport.update({ where: { id: report.id }, data: { lastSentAt: now, nextSendAt: new Date(now.getTime() + delayMs) } });
+      await prisma.scheduledReport.update({ where: { id: report.id }, data: { lastSentAt: now, nextSendAt: new Date(now.getTime() + delayMs), lastError: null } });
     } catch {}
   }
   results.reportsSent = dueReports.length;
 
-  // Re-enqueue self for next hour
+  // Re-enqueue self for next hour (use jobId to prevent duplicates if crash recovery also enqueues)
   const cronQueue = new (await import('bullmq')).Queue('system-cron', { connection: connection as never });
-  await cronQueue.add('hourly', {}, { delay: 3600000 });
+  await cronQueue.add('hourly', {}, { delay: 3600000, jobId: `cron-hourly-${Date.now()}` });
   await cronQueue.close();
 
   return { processed: true, ...results };
 }
 
 // ── Email Automation Drip Engine ───────────────────────────────────────
+
+async function assertAutomationEmailSendable(input: {
+  tenantId: string;
+  contactId: string;
+  contactEmail: string;
+  subject: string;
+  body: string;
+  fromEmail: string;
+  companyAddress?: string;
+}) {
+  if (!input.fromEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.fromEmail)) throw new Error('Valid sender email is required');
+  if (!input.subject.trim()) throw new Error('Subject is required');
+  if (!input.body.trim()) throw new Error('Body is required');
+  if (!input.companyAddress?.trim()) throw new Error('Company address is required');
+  const warnings = contentQaWarnings({ subject: input.subject, body: input.body });
+  const blocking = warnings.find((warning) => warning.severity === 'error');
+  if (blocking) throw new Error(blocking.label);
+  const domainName = input.fromEmail.split('@')[1]?.toLowerCase();
+  const domain = domainName ? await prisma.sendingDomain.findFirst({ where: { tenantId: input.tenantId, domain: domainName } }) : null;
+  const verified = !!domain && [domain.spfStatus, domain.dkimStatus, domain.mxStatus, domain.dmarcStatus].every((status) => status === DnsRecordStatus.verified);
+  if (!verified) throw new Error('Sender domain must be verified');
+  const contact = await prisma.contact.findFirst({ where: { tenantId: input.tenantId, id: input.contactId, email: input.contactEmail.toLowerCase(), marketingConsent: true } });
+  if (!contact) throw new Error('Contact is missing marketing consent');
+  const suppression = await prisma.suppressionEntry.findUnique({ where: { tenantId_email: { tenantId: input.tenantId, email: input.contactEmail.toLowerCase() } } });
+  if (suppression) throw new Error('Contact is suppressed');
+}
 
 async function processAutomationTick(data: Record<string, unknown>) {
   const payload = (data.payload && typeof data.payload === 'object') ? data.payload as Record<string, unknown> : data;
@@ -1225,6 +1401,15 @@ async function processAutomationTick(data: Record<string, unknown>) {
         const fromEmail = (config.fromEmail as string) ?? '';
         const fromName = (config.fromName as string) ?? '';
         if (fromEmail && body) {
+          await assertAutomationEmailSendable({
+            tenantId: automation.tenantId,
+            contactId: exec.contactId,
+            contactEmail: exec.contactEmail,
+            subject,
+            body,
+            fromEmail,
+            companyAddress: config.companyAddress as string | undefined,
+          });
           const contact = await prisma.contact.findUnique({ where: { id: exec.contactId } });
           const mergedBody = body
             .replace(/\{\{firstName\}\}/g, contact?.firstName ?? '')
@@ -1288,7 +1473,7 @@ async function processAutomationTick(data: Record<string, unknown>) {
     } catch (error) {
       await prisma.automationExecution.update({
         where: { id: exec.id },
-        data: { lastError: error instanceof Error ? error.message : String(error) },
+        data: { status: 'failed', completedAt: new Date(), lastError: error instanceof Error ? error.message : String(error) },
       });
     }
   }
@@ -1360,19 +1545,21 @@ for (const queueName of queues) {
   }, { connection: connection as never });
 }
 
-// Bootstrap system cron on startup
+// Bootstrap system cron on startup — always ensure a cron job exists (crash recovery)
 (async () => {
   const { Queue } = await import('bullmq');
   const cronQueue = new Queue('system-cron', { connection: connection as never });
-  const waiting = await cronQueue.getWaiting();
-  if (waiting.length === 0) {
+  const [waiting, delayed] = await Promise.all([cronQueue.getWaiting(), cronQueue.getDelayed()]);
+  if (waiting.length === 0 && delayed.length === 0) {
     await cronQueue.add('hourly', {}, { delay: 60000 });
+    console.log('[CRON] System cron bootstrapped — first run in 60s');
   }
   await cronQueue.close();
-})().catch(() => undefined);
+})().catch((err) => console.error('[CRON] Failed to bootstrap system cron:', err));
 
 process.on('SIGINT', async () => {
   await prisma.$disconnect();
   await connection.quit();
   process.exit(0);
 });
+

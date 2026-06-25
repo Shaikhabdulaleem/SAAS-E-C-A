@@ -50,6 +50,16 @@ export class TenantsController {
     return this.tenants.remove(tenantId, user.id);
   }
 
+  @Delete(':tenantId/hard')
+  hardRemove(@Param('tenantId') tenantId: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.tenants.remove(tenantId, user.id, true);
+  }
+
+  @Get(':tenantId/export')
+  exportData(@Param('tenantId') tenantId: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.tenants.exportTenantData(tenantId, user.id);
+  }
+
   @Get(':tenantId/access')
   access(@Param('tenantId') tenantId: string) {
     return this.tenants.getAccess(tenantId);

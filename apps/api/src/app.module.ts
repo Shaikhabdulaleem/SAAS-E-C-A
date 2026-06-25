@@ -22,6 +22,7 @@ import { CallsModule } from './calls/calls.module';
 import { PricingModule } from './pricing/pricing.module';
 import { ProposalsModule } from './proposals/proposals.module';
 import { FinanceModule } from './finance/finance.module';
+import { OpenApiController } from './common/openapi.controller';
 
 @Module({
   imports: [
@@ -52,5 +53,6 @@ import { FinanceModule } from './finance/finance.module';
     ProposalsModule,
     FinanceModule,
   ],
+  controllers: [OpenApiController],
 })
 export class AppModule {}

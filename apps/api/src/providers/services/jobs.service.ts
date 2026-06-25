@@ -20,6 +20,7 @@ export class JobsService implements OnModuleDestroy {
     payload?: Prisma.InputJsonValue;
     scheduledAt?: Date;
     maxAttempts?: number;
+    required?: boolean;
   }) {
     const log = await this.prisma.jobLog.create({
       data: {
@@ -47,11 +48,25 @@ export class JobsService implements OnModuleDestroy {
           data: { providerRequestId: job.id },
         });
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (input.required) {
+          await this.prisma.jobLog.update({
+            where: { id: log.id },
+            data: { status: JobStatus.failed, completedAt: new Date(), lastError: message },
+          });
+          throw error;
+        }
         return this.prisma.jobLog.update({
           where: { id: log.id },
-          data: { lastError: error instanceof Error ? error.message : String(error) },
+          data: { lastError: message },
         });
       }
+    } else if (input.required) {
+      await this.prisma.jobLog.update({
+        where: { id: log.id },
+        data: { status: JobStatus.failed, completedAt: new Date(), lastError: 'Redis is not configured' },
+      });
+      throw new Error('Redis is not configured');
     }
 
     return log;

@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Headers, Param, Post, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Headers, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { UserRole } from '@prisma/client';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { RequireService } from '../auth/decorators/required-service.decorator';
@@ -30,8 +30,8 @@ export class AiController {
   }
 
   @Get('sessions/:sessionId/messages')
-  messages(@CurrentUser() user: AuthenticatedUser, @Param('sessionId') sessionId: string, @Headers('x-tenant-id') selectedTenantId?: string) {
-    return this.ai.listMessages(tenantId(user, selectedTenantId), user.id, sessionId);
+  messages(@CurrentUser() user: AuthenticatedUser, @Param('sessionId') sessionId: string, @Query() query: Record<string, string>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.ai.listMessages(tenantId(user, selectedTenantId), user.id, sessionId, query);
   }
 
   @Post('chat')
@@ -47,5 +47,10 @@ export class AiController {
   @Get('daily-summary')
   dailySummary(@CurrentUser() user: AuthenticatedUser, @Headers('x-tenant-id') selectedTenantId?: string) {
     return this.ai.dailySummary(tenantId(user, selectedTenantId), user.id);
+  }
+
+  @Get('usage')
+  usage(@CurrentUser() user: AuthenticatedUser, @Query() query: Record<string, string>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.ai.usage(tenantId(user, selectedTenantId), user.id, query);
   }
 }

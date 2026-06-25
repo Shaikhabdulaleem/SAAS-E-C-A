@@ -1,4 +1,4 @@
-import { Prisma } from '@prisma/client';
+import { EmailLinkPurpose, Prisma } from '@prisma/client';
 import { createHash, randomBytes } from 'crypto';
 
 export type EmailContentVariant = {
@@ -95,7 +95,7 @@ export function getVariantIds(campaign: { abTestEnabled?: boolean | null; abVari
   return ids;
 }
 
-export type RenderResult = { html: string; unsubscribeUrl: string } | null;
+export type RenderResult = { html: string; unsubscribeUrl: string; preferencesUrl: string; viewUrl: string } | null;
 
 export async function renderEmailWithTracking(input: {
   store: TrackingStore;
@@ -116,18 +116,34 @@ export async function renderEmailWithTracking(input: {
   await store.trackingEvent.create({
     data: { tenantId, campaignId, recipientId, email, type: 'token', token: openToken },
   }).catch((err) => console.warn(`[TRACKING] Failed to create open-tracking token for ${email}:`, err?.message ?? err));
-  const unsubToken = randomBytes(32).toString('base64url');
-  await store.unsubscribeToken.create({
-    data: {
-      tenantId,
-      email,
-      campaignId,
-      tokenHash: hashValue(unsubToken),
-      expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 365),
-    },
-  }).catch((err) => console.warn(`[TRACKING] Failed to create unsubscribe token for ${email}:`, err?.message ?? err));
+  const unsubToken = await createPurposeToken(store, {
+    tenantId,
+    email,
+    campaignId,
+    recipientId,
+    purpose: EmailLinkPurpose.unsubscribe,
+    expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 365),
+  });
+  const prefToken = await createPurposeToken(store, {
+    tenantId,
+    email,
+    campaignId,
+    recipientId,
+    purpose: EmailLinkPurpose.preferences,
+    expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 365),
+  });
+  const viewToken = await createPurposeToken(store, {
+    tenantId,
+    email,
+    campaignId,
+    recipientId,
+    purpose: EmailLinkPurpose.view,
+    expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 30),
+  });
   const unsubUrl = `${baseUrl}/email/events/unsubscribe/${unsubToken}`;
-  const linkedBody = trackClicks ? rewriteLinks(body, baseUrl, openToken) : body;
+  const preferencesUrl = `${baseUrl}/email/events/preferences/${prefToken}`;
+  const viewUrl = `${baseUrl}/email/events/view/${viewToken}`;
+  const linkedBody = trackClicks ? await rewriteLinks(body, baseUrl, openToken, store, { tenantId, campaignId, recipientId, email }) : body;
   const openPixel = trackOpens ? `<img src="${baseUrl}/email/events/open/${openToken}" alt="" width="1" height="1" style="display:none" />` : '';
 
   const addressLine = companyAddress ? `<p style="margin:0 0 8px 0;">${escapeHtml(companyAddress)}</p>` : '';
@@ -143,11 +159,12 @@ export async function renderEmailWithTracking(input: {
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f4f4;">
 <tr><td align="center" style="padding:20px 0;">
 <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:8px;max-width:600px;width:100%;">
-<tr><td style="padding:32px;">
+<tr><td style="padding:12px 32px 0 32px;text-align:right;font-size:12px;color:#666;"><a href="${viewUrl}" style="color:#666;text-decoration:underline;">View in browser</a></td></tr>
+<tr><td style="padding:24px 32px 32px 32px;">
 ${linkedBody}
 </td></tr>
 <tr><td style="padding:16px 32px;background-color:#f9f9f9;border-top:1px solid #eee;font-size:12px;color:#999999;text-align:center;line-height:1.5;">
-${addressLine}<a href="${unsubUrl}" style="color:#999999;text-decoration:underline;">Unsubscribe</a>
+${addressLine}<a href="${preferencesUrl}" style="color:#999999;text-decoration:underline;">Email preferences</a> &nbsp;|&nbsp; <a href="${unsubUrl}" style="color:#999999;text-decoration:underline;">Unsubscribe</a>
 </td></tr>
 </table>
 </td></tr>
@@ -156,16 +173,63 @@ ${openPixel}
 </body>
 </html>`;
 
-  return { html, unsubscribeUrl: unsubUrl };
+  return { html, unsubscribeUrl: unsubUrl, preferencesUrl, viewUrl };
 }
 
-export function rewriteLinks(body: string, baseUrl: string, token: string) {
-  return body.replace(/href=(["'])([^"']+)\1/gi, (_match, quote: string, url: string) => {
+async function createPurposeToken(store: TrackingStore, input: {
+  tenantId: string;
+  email: string;
+  campaignId: string;
+  recipientId: string;
+  purpose: EmailLinkPurpose;
+  expiresAt: Date;
+}) {
+  const token = randomBytes(32).toString('base64url');
+  await store.unsubscribeToken.create({
+    data: {
+      tenantId: input.tenantId,
+      email: input.email,
+      campaignId: input.campaignId,
+      recipientId: input.recipientId,
+      purpose: input.purpose,
+      tokenHash: hashValue(token),
+      expiresAt: input.expiresAt,
+    },
+  }).catch((err) => console.warn(`[TRACKING] Failed to create ${input.purpose} token for ${input.email}:`, err?.message ?? err));
+  return token;
+}
+
+export async function rewriteLinks(
+  body: string,
+  baseUrl: string,
+  token: string,
+  store?: Pick<TrackingStore, 'trackingEvent'>,
+  context?: { tenantId: string; campaignId: string; recipientId: string; email: string },
+) {
+  const links: Array<{ original: string; tracked: string }> = [];
+  const rewritten = body.replace(/href=(["'])([^"']+)\1/gi, (_match, quote: string, url: string) => {
     if (/^(mailto:|tel:|#|javascript:)/i.test(url)) return `href=${quote}${url}${quote}`;
     if (!/^https?:\/\//i.test(url)) return `href=${quote}${url}${quote}`;
     const tracked = `${baseUrl}/email/events/click/${token}?url=${encodeURIComponent(url)}`;
+    links.push({ original: url, tracked });
     return `href=${quote}${tracked}${quote}`;
   });
+  if (store && context && links.length) {
+    for (const link of links) {
+      await store.trackingEvent.create({
+        data: {
+          tenantId: context.tenantId,
+          campaignId: context.campaignId,
+          recipientId: context.recipientId,
+          email: context.email,
+          type: 'link_target',
+          token,
+          url: link.original,
+        },
+      }).catch(() => undefined);
+    }
+  }
+  return rewritten;
 }
 
 const SPAM_TRIGGER_WORDS = /\b(free|buy now|act now|limited time|click here|winner|congratulations|urgent|100% free|no cost|order now|risk.?free|call now|apply now|don't miss|exclusive deal)\b/i;

@@ -76,6 +76,11 @@ export class ColdMailboxController {
     return this.coldEmail.updateMailbox(tenantId(user, selectedTenantId), id, body);
   }
 
+  @Delete('clear-all')
+  clearAll(@CurrentUser() user: AuthenticatedUser, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.coldEmail.clearAllMailboxes(tenantId(user, selectedTenantId));
+  }
+
   @Delete(':id')
   remove(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Headers('x-tenant-id') selectedTenantId?: string) {
     return this.coldEmail.removeMailbox(tenantId(user, selectedTenantId), id);
@@ -207,7 +212,7 @@ export class ColdCampaignController {
 
   @Post(':id/duplicate')
   duplicate(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Headers('x-tenant-id') selectedTenantId?: string) {
-    return this.coldEmail.duplicateCampaign(tenantId(user, selectedTenantId), id);
+    return this.coldEmail.duplicateCampaign(tenantId(user, selectedTenantId), id, user.id);
   }
 }
 
@@ -235,8 +240,12 @@ export class ColdEmailWebhookController {
   constructor(private readonly coldEmail: ColdEmailService) {}
 
   @Post('sendgrid')
-  async handleSendGridEvents(@Body() body: unknown) {
-    return this.coldEmail.handleSendGridWebhook(body);
+  async handleSendGridEvents(
+    @Body() body: unknown,
+    @Headers('x-twilio-email-event-webhook-signature') signature?: string,
+    @Headers('x-twilio-email-event-webhook-timestamp') timestamp?: string,
+  ) {
+    return this.coldEmail.handleSendGridWebhook(body, signature, timestamp);
   }
 }
 

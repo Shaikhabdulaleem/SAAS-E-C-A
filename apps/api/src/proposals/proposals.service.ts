@@ -4,6 +4,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { ProposalNumberService } from './proposal-number.service';
 import { BrandingService } from './branding.service';
 import { ProposalActivityService } from './proposal-activity.service';
+import { CrmAutomationService } from '../crm/crm-automation.service';
 
 @Injectable()
 export class ProposalsService {
@@ -12,6 +13,7 @@ export class ProposalsService {
     private readonly numbers: ProposalNumberService,
     private readonly branding: BrandingService,
     private readonly activity: ProposalActivityService,
+    private readonly crmAutomation: CrmAutomationService,
   ) {}
 
   // ── List ────────────────────────────────────────────────────────────────
@@ -209,7 +211,14 @@ export class ProposalsService {
     if (status === 'accepted') data.acceptedAt = new Date();
     if (status === 'rejected') data.rejectedAt = new Date();
 
-    return this.prisma.proposal.update({ where: { id }, data });
+    const proposal = await this.prisma.proposal.update({ where: { id }, data });
+
+    if (proposal.tenantId) {
+      if (status === 'sent') this.crmAutomation.onProposalSent(proposal.tenantId, id).catch(() => {});
+      if (status === 'accepted') this.crmAutomation.onProposalAccepted(proposal.tenantId, id).catch(() => {});
+    }
+
+    return proposal;
   }
 
   // ── Track & Public Actions ──────────────────────────────────────────────
@@ -229,6 +238,10 @@ export class ProposalsService {
       metadata,
     });
 
+    if (proposal.tenantId) {
+      this.crmAutomation.onProposalViewed(proposal.tenantId, proposal.id).catch(() => {});
+    }
+
     return this.getByToken(token);
   }
 
@@ -242,6 +255,11 @@ export class ProposalsService {
     });
 
     await this.activity.log({ proposalId: proposal.id, eventType: 'accepted', actorType: 'customer' });
+
+    if (proposal.tenantId) {
+      this.crmAutomation.onProposalAccepted(proposal.tenantId, proposal.id).catch(() => {});
+    }
+
     return { success: true };
   }
 

@@ -151,6 +151,56 @@ export class BillingService {
     return { processed: false, type };
   }
 
+  async changePlan(tenantId: string, body: Record<string, unknown>) {
+    const apiKey = this.requireStripe();
+    const newPriceId = this.requiredString(body.priceId, 'priceId');
+    const subscription = await this.prisma.billingSubscription.findFirst({ where: { tenantId }, orderBy: { createdAt: 'desc' } });
+    if (!subscription?.stripeSubscriptionId) throw new BadRequestException('No active subscription to change');
+
+    const subResponse = await this.stripeGet(`/v1/subscriptions/${subscription.stripeSubscriptionId}`, apiKey);
+    const items = subResponse?.items?.data;
+    if (!Array.isArray(items) || items.length === 0) throw new BadRequestException('Subscription has no items');
+    const itemId = items[0].id;
+
+    const payload = new URLSearchParams({
+      [`items[0][id]`]: itemId,
+      [`items[0][price]`]: newPriceId,
+      proration_behavior: this.optionalString(body.prorationBehavior) ?? 'create_prorations',
+    });
+    const response = await this.stripe(`/v1/subscriptions/${subscription.stripeSubscriptionId}`, apiKey, payload);
+    await this.logs.create({ tenantId, provider: 'stripe', operation: 'change_plan', status: 'success', response });
+
+    const planMapping: Record<string, PlanKey> = {};
+    const plan = this.optionalString(body.planKey);
+    if (plan && Object.values(PlanKey).includes(plan as PlanKey)) {
+      await this.prisma.tenant.update({ where: { id: tenantId }, data: { plan: plan as PlanKey } });
+    }
+
+    return { success: true, subscriptionId: subscription.stripeSubscriptionId };
+  }
+
+  async deletePaymentMethod(tenantId: string, paymentMethodId: string) {
+    const apiKey = this.requireStripe();
+    const method = await this.prisma.paymentMethodRef.findFirst({ where: { tenantId, id: paymentMethodId } });
+    if (!method) throw new BadRequestException('Payment method not found');
+    if (method.stripePaymentMethodId) {
+      await this.stripe('/v1/payment_methods/' + method.stripePaymentMethodId + '/detach', apiKey, new URLSearchParams());
+    }
+    await this.prisma.paymentMethodRef.delete({ where: { id: paymentMethodId } });
+    await this.logs.create({ tenantId, provider: 'stripe', operation: 'delete_payment_method', status: 'success' });
+    return { success: true };
+  }
+
+  private async stripeGet(path: string, apiKey: string) {
+    const response = await fetch(`https://api.stripe.com${path}`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new BadRequestException(`Stripe request failed: ${JSON.stringify(payload)}`);
+    return payload;
+  }
+
   private async stripe(path: string, apiKey: string, body: URLSearchParams) {
     const response = await fetch(`https://api.stripe.com${path}`, {
       method: 'POST',

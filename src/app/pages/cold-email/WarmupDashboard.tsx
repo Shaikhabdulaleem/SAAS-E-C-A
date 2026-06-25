@@ -95,6 +95,7 @@ export function WarmupDashboard() {
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('all');
   const [advancing, setAdvancing] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => { fetchData(); }, []);
 
@@ -102,7 +103,8 @@ export function WarmupDashboard() {
     try {
       const data = await apiRequest<WarmupApiResponse>('/provisioning/warmup');
       setPersonas(normalizeWarmupResponse(data));
-    } catch {
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Operation failed');
       setPersonas([]);
     } finally {
       setLoading(false);
@@ -114,7 +116,8 @@ export function WarmupDashboard() {
     try {
       await apiRequest<WarmupApiPersona>(`/provisioning/warmup/${personaId}/advance`, { method: 'POST' });
       await fetchData();
-    } catch {
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Operation failed');
     } finally {
       setAdvancing(null);
     }

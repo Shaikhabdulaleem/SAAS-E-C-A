@@ -58,6 +58,7 @@ export function ProvisioningWizard() {
   const [jobTitle, setJobTitle] = useState('Sales Development Rep');
   const [result, setResult] = useState<ProvisionResult | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const [providers, setProviders] = useState<ProviderCredential[]>([]);
   const [useProvider, setUseProvider] = useState(false);
@@ -72,7 +73,7 @@ export function ProvisioningWizard() {
           setUseProvider(true);
         }
       })
-      .catch(() => {});
+      .catch((err: unknown) => { setError(err instanceof Error ? err.message : 'Operation failed'); });
   }, []);
 
   const addDomain = () => {
@@ -100,7 +101,8 @@ export function ProvisioningWizard() {
       });
       setPlan(data);
       setStep(2);
-    } catch {
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Operation failed');
     } finally {
       setLoading(false);
     }
@@ -122,7 +124,8 @@ export function ProvisioningWizard() {
       });
       setResult(data);
       setStep(3);
-    } catch {
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Operation failed');
     } finally {
       setLoading(false);
     }

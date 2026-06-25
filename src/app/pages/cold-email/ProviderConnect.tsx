@@ -34,6 +34,7 @@ export function ProviderConnect() {
   const [clientId, setClientId] = useState('');
   const [clientSecret, setClientSecret] = useState('');
   const [showSecret, setShowSecret] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => { fetchProviders(); }, []);
 
@@ -41,7 +42,8 @@ export function ProviderConnect() {
     try {
       const data = await apiRequest<ProviderCredential[]>('/provisioning/providers');
       setProviders(data);
-    } catch {
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Operation failed');
     } finally {
       setLoading(false);
     }
@@ -64,7 +66,8 @@ export function ProviderConnect() {
       setClientId('');
       setClientSecret('');
       await fetchProviders();
-    } catch {
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Operation failed');
     } finally {
       setConnecting(false);
     }
@@ -74,7 +77,8 @@ export function ProviderConnect() {
     try {
       await apiRequest(`/provisioning/providers/${id}`, { method: 'DELETE' });
       setProviders(prev => prev.filter(p => p.id !== id));
-    } catch {
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Operation failed');
     }
   };
 

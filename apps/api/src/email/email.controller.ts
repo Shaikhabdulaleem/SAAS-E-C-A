@@ -140,8 +140,8 @@ export class EmailController {
   }
 
   @Get(':campaignId/view')
-  async viewInBrowser(@Param('campaignId') campaignId: string, @Req() req: any, @Headers('x-tenant-id') selectedTenantId?: string) {
-    const tid = selectedTenantId ?? req.query?.tenantId;
+  async viewInBrowser(@Param('campaignId') campaignId: string, @Headers('x-tenant-id') selectedTenantId?: string) {
+    const tid = selectedTenantId;
     if (!tid) return '<p>Missing tenant context</p>';
     return this.email.viewInBrowser(tid, campaignId);
   }
@@ -331,6 +331,11 @@ export class EmailEventsController {
     return this.email.handleUnsubscribe(token);
   }
 
+  @Get('view/:token')
+  view(@Param('token') token: string) {
+    return this.email.viewInBrowserByToken(token);
+  }
+
   @Get('confirm-optin/:token')
   confirmOptIn(@Param('token') token: string) {
     return this.email.confirmOptIn(token);
@@ -338,10 +343,7 @@ export class EmailEventsController {
 
   @Get('preferences/:token')
   async preferences(@Param('token') token: string) {
-    const tokenHash = require('crypto').createHash('sha256').update(token).digest('hex');
-    const record = await this.email['prisma'].unsubscribeToken.findUnique({ where: { tokenHash } });
-    if (!record) throw new BadRequestException('Invalid token');
-    return this.email.getPreferences(record.tenantId, record.email);
+    return this.email.getPreferencesByToken(token);
   }
 
   @Post('preferences/:token')
@@ -394,7 +396,7 @@ export class EmailWebhookController {
   constructor(private readonly email: EmailService) {}
 
   @Post('sendgrid')
-  sendgrid(@Body() body: unknown, @Headers() headers: Record<string, string | string[] | undefined>) {
-    return this.email.handleProviderEvents(body, headers);
+  sendgrid(@Body() body: unknown, @Headers() headers: Record<string, string | string[] | undefined>, @Req() req?: { rawBody?: Buffer }) {
+    return this.email.handleProviderEvents(body, headers, req?.rawBody);
   }
 }

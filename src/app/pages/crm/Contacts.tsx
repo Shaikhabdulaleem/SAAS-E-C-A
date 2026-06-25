@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useData } from '../../contexts/DataContext';
 import { Link } from 'react-router';
-import { Search, Plus, Mail, Phone, Building2, Tag, SlidersHorizontal, ChevronDown, MoreHorizontal, Users, X, Send } from 'lucide-react';
+import { Search, Plus, Mail, Phone, Building2, Tag, SlidersHorizontal, ChevronDown, MoreHorizontal, Users, X, Send, Package } from 'lucide-react';
 import { apiRequest } from '../../lib/api';
 import { Checkbox } from '../../components/ui/checkbox';
 import { Card, CardContent, CardHeader } from '../../components/ui/card';
@@ -24,6 +24,13 @@ const AVATAR_COLORS = [
   'bg-amber-500',
 ];
 
+const SERVICE_OPTIONS = [
+  { key: 'email_marketing', label: 'Email Marketing' },
+  { key: 'cold_outreach', label: 'Cold Outreach' },
+  { key: 'ai_call_assistant', label: 'AI Call Assistant' },
+  { key: 'advanced_analytics', label: 'Advanced Analytics' },
+];
+
 const statusConfig: Record<string, { label: string; className: string }> = {
   lead: { label: 'Lead', className: 'bg-amber-50 text-amber-700 border-amber-200' },
   prospect: { label: 'Prospect', className: 'bg-sky-50 text-sky-700 border-sky-200' },
@@ -31,7 +38,7 @@ const statusConfig: Record<string, { label: string; className: string }> = {
   churned: { label: 'Churned', className: 'bg-red-50 text-red-700 border-red-200' },
 };
 
-export function Contacts() {
+export function Contacts({ hideHeader = false }: { hideHeader?: boolean }) {
   const { contacts, companies, addContact, deleteContact, addDeal, addActivity, apiError } = useData();
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
@@ -48,6 +55,7 @@ export function Contacts() {
     source: 'manual' as 'manual' | 'import' | 'campaign' | 'api',
     assignedTo: '',
     tags: '',
+    interestedServices: [] as string[],
     marketingConsent: false,
     marketingConsentSource: '',
   });
@@ -139,11 +147,12 @@ export function Contacts() {
       status: form.status,
       source: form.source,
       tags: form.tags.split(',').map(t => t.trim()).filter(Boolean),
+      interestedServices: form.interestedServices,
       marketingConsent: form.marketingConsent,
       marketingConsentSource: form.marketingConsentSource.trim() || (form.marketingConsent ? 'manual' : undefined),
     });
     setShowModal(false);
-    setForm({ firstName: '', lastName: '', email: '', phone: '', jobTitle: '', companyId: 'none', status: 'lead', source: 'manual', assignedTo: '', tags: '', marketingConsent: false, marketingConsentSource: '' });
+    setForm({ firstName: '', lastName: '', email: '', phone: '', jobTitle: '', companyId: 'none', status: 'lead', source: 'manual', assignedTo: '', tags: '', interestedServices: [], marketingConsent: false, marketingConsentSource: '' });
     setErrors({});
   };
 
@@ -249,6 +258,32 @@ export function Contacts() {
                 <Label>Tags</Label>
                 <Input value={form.tags} onChange={e => set('tags', e.target.value)} placeholder="high-value, decision-maker" />
               </div>
+              <div className="space-y-1.5">
+                <Label>Interested Services</Label>
+                <div className="flex flex-wrap gap-2">
+                  {SERVICE_OPTIONS.map(svc => {
+                    const selected = form.interestedServices.includes(svc.key);
+                    return (
+                      <button
+                        key={svc.key}
+                        type="button"
+                        onClick={() => setForm(f => ({
+                          ...f,
+                          interestedServices: selected
+                            ? f.interestedServices.filter(s => s !== svc.key)
+                            : [...f.interestedServices, svc.key],
+                        }))}
+                        className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+                          selected ? 'bg-primary text-white border-primary' : 'bg-background text-muted-foreground border-border hover:border-primary/50'
+                        }`}
+                      >
+                        <Package className="h-3 w-3" />
+                        {svc.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
               <div className="space-y-3 rounded-lg border border-border p-3">
                 <div className="flex items-center justify-between">
                   <div>
@@ -280,16 +315,26 @@ export function Contacts() {
       )}
 
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <h1 className="text-foreground">Contacts</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">Manage your customer relationships</p>
+      {!hideHeader && (
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div>
+            <h1 className="text-foreground">Contacts</h1>
+            <p className="text-sm text-muted-foreground mt-0.5">Manage your customer relationships</p>
+          </div>
+          <Button size="sm" onClick={() => setShowModal(true)}>
+            <Plus className="h-4 w-4 mr-1.5" />
+            Add Contact
+          </Button>
         </div>
-        <Button size="sm" onClick={() => setShowModal(true)}>
-          <Plus className="h-4 w-4 mr-1.5" />
-          Add Contact
-        </Button>
-      </div>
+      )}
+      {hideHeader && (
+        <div className="flex justify-end">
+          <Button size="sm" onClick={() => setShowModal(true)}>
+            <Plus className="h-4 w-4 mr-1.5" />
+            Add Contact
+          </Button>
+        </div>
+      )}
 
       {/* Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -413,7 +458,7 @@ export function Contacts() {
                 <th className="px-5 py-3 text-left text-xs font-medium text-muted-foreground hidden md:table-cell">Company</th>
                 <th className="px-5 py-3 text-left text-xs font-medium text-muted-foreground">Status</th>
                 <th className="px-5 py-3 text-left text-xs font-medium text-muted-foreground hidden lg:table-cell">Contact Info</th>
-                <th className="px-5 py-3 text-left text-xs font-medium text-muted-foreground hidden xl:table-cell">Tags</th>
+                <th className="px-5 py-3 text-left text-xs font-medium text-muted-foreground hidden xl:table-cell">Interested In</th>
                 <th className="px-5 py-3 w-10" />
               </tr>
             </thead>
@@ -472,14 +517,20 @@ export function Contacts() {
                   </td>
                   <td className="px-5 py-3.5 hidden xl:table-cell">
                     <div className="flex flex-wrap gap-1">
-                      {contact.tags.slice(0, 2).map((tag) => (
-                        <span key={tag} className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-muted text-muted-foreground rounded text-xs">
-                          <Tag className="h-2.5 w-2.5" />
-                          {tag}
-                        </span>
-                      ))}
-                      {contact.tags.length > 2 && (
-                        <span className="text-xs text-muted-foreground">+{contact.tags.length - 2}</span>
+                      {(contact.interestedServices ?? []).slice(0, 2).map((svc: string) => {
+                        const label = SERVICE_OPTIONS.find(s => s.key === svc)?.label ?? svc;
+                        return (
+                          <span key={svc} className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-primary/10 text-primary rounded text-xs">
+                            <Package className="h-2.5 w-2.5" />
+                            {label}
+                          </span>
+                        );
+                      })}
+                      {(contact.interestedServices ?? []).length > 2 && (
+                        <span className="text-xs text-muted-foreground">+{contact.interestedServices.length - 2}</span>
+                      )}
+                      {(contact.interestedServices ?? []).length === 0 && (
+                        <span className="text-xs text-muted-foreground/50">—</span>
                       )}
                     </div>
                   </td>

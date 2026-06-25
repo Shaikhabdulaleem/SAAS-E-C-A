@@ -39,7 +39,7 @@ const emptyForm = {
   website: '', phone: '', assignedTo: '', tags: '',
 };
 
-export function Companies() {
+export function Companies({ hideHeader = false }: { hideHeader?: boolean }) {
   const { companies, contacts, deals, addCompany, updateCompany, deleteCompany, apiError } = useData();
   const [searchTerm, setSearchTerm] = useState('');
   const [view, setView] = useState<'grid' | 'list'>('grid');
@@ -256,16 +256,26 @@ export function Companies() {
       )}
 
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <h1 className="text-foreground">Companies</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">Manage your business accounts</p>
+      {!hideHeader && (
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div>
+            <h1 className="text-foreground">Companies</h1>
+            <p className="text-sm text-muted-foreground mt-0.5">Manage your business accounts</p>
+          </div>
+          <Button size="sm" onClick={openAdd}>
+            <Plus className="h-4 w-4 mr-1.5" />
+            Add Company
+          </Button>
         </div>
-        <Button size="sm" onClick={openAdd}>
-          <Plus className="h-4 w-4 mr-1.5" />
-          Add Company
-        </Button>
-      </div>
+      )}
+      {hideHeader && (
+        <div className="flex justify-end">
+          <Button size="sm" onClick={openAdd}>
+            <Plus className="h-4 w-4 mr-1.5" />
+            Add Company
+          </Button>
+        </div>
+      )}
 
       {/* Stats */}
       <div className="grid grid-cols-3 gap-3">

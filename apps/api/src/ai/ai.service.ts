@@ -19,13 +19,20 @@ export class AiService {
     });
   }
 
-  async listMessages(tenantId: string, userId: string, sessionId: string) {
+  async listMessages(tenantId: string, userId: string, sessionId: string, query: Record<string, string> = {}) {
     await this.ensureSession(tenantId, userId, sessionId);
-    return this.prisma.aiMessage.findMany({ where: { sessionId }, orderBy: { timestamp: 'asc' } });
+    const page = Math.max(Number(query.page ?? 1), 1);
+    const pageSize = Math.min(Math.max(Number(query.pageSize ?? 50), 1), 100);
+    const [items, total] = await Promise.all([
+      this.prisma.aiMessage.findMany({ where: { sessionId }, orderBy: { timestamp: 'asc' }, skip: (page - 1) * pageSize, take: pageSize }),
+      this.prisma.aiMessage.count({ where: { sessionId } }),
+    ]);
+    return { items, page, pageSize, total };
   }
 
   async chat(tenantId: string, userId: string, body: Record<string, unknown>) {
     const content = this.requiredString(body.message ?? body.content, 'message');
+    const model = this.optionalModel(body.model) ?? 'local-context';
     const session = body.sessionId
       ? await this.ensureSession(tenantId, userId, String(body.sessionId))
       : await this.prisma.aiSession.create({ data: { tenantId, userId, title: content.slice(0, 60) } });
@@ -45,7 +52,7 @@ export class AiService {
     await this.prisma.$transaction([
       this.prisma.aiMessage.create({ data: { sessionId: session.id, role: 'user', content } }),
       this.prisma.aiMessage.create({ data: { sessionId: session.id, role: 'assistant', content: response } }),
-      this.prisma.aiUsageEvent.create({ data: { tenantId, userId, sessionId: session.id, action: 'chat', model: 'local-context', tokens: Math.ceil((content.length + response.length) / 4) } }),
+      this.prisma.aiUsageEvent.create({ data: { tenantId, userId, sessionId: session.id, action: 'chat', model, tokens: Math.ceil((content.length + response.length) / 4) } }),
       this.prisma.aiSession.update({ where: { id: session.id }, data: { updatedAt: new Date() } }),
     ]);
 
@@ -57,8 +64,34 @@ export class AiService {
     const contacts = await this.prisma.contact.findMany({ where: { tenantId }, take: 1 });
     const firstName = contacts[0]?.firstName ?? '[First Name]';
     const content = `Subject: Following up on ${goal}\n\nHi ${firstName},\n\nI wanted to follow up with a quick note about ${goal}. Based on our recent conversation, your team can keep CRM, campaigns, and sales insights in one place.\n\nWould you be open to a 20-minute call this week to discuss next steps?\n\nBest,\nYour team`;
-    await this.prisma.aiUsageEvent.create({ data: { tenantId, userId, action: 'generate_email', model: 'local-template', tokens: Math.ceil(content.length / 4) } });
+    await this.prisma.aiUsageEvent.create({ data: { tenantId, userId, action: 'generate_email', model: this.optionalModel(body.model) ?? 'local-template', tokens: Math.ceil(content.length / 4) } });
     return { content };
+  }
+
+  async usage(tenantId: string, userId: string, query: Record<string, string>) {
+    const from = this.optionalDate(query.from);
+    const to = this.optionalDate(query.to);
+    const where = {
+      tenantId,
+      ...(query.mine === 'false' ? {} : { userId }),
+      ...(from || to ? { createdAt: { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) } } : {}),
+    };
+    const events = await this.prisma.aiUsageEvent.findMany({ where, orderBy: { createdAt: 'desc' }, take: 500 });
+    const totalTokens = events.reduce((sum, event) => sum + event.tokens, 0);
+    const byAction = new Map<string, { count: number; tokens: number }>();
+    for (const event of events) {
+      const current = byAction.get(event.action) ?? { count: 0, tokens: 0 };
+      current.count += 1;
+      current.tokens += event.tokens;
+      byAction.set(event.action, current);
+    }
+    return {
+      totalEvents: events.length,
+      totalTokens,
+      estimatedCostUsd: Math.round(totalTokens * 0.00000015 * 10000) / 10000,
+      byAction: Object.fromEntries(byAction.entries()),
+      events,
+    };
   }
 
   async dailySummary(tenantId: string, userId: string) {
@@ -108,5 +141,19 @@ export class AiService {
   private requiredString(value: unknown, field: string) {
     if (typeof value !== 'string' || value.trim().length === 0) throw new BadRequestException(`${field} is required`);
     return value.trim();
+  }
+
+  private optionalModel(value: unknown) {
+    if (typeof value !== 'string' || !value.trim()) return undefined;
+    const allowed = ['local-context', 'local-template', 'local-summary', 'gpt-4.1-mini', 'gpt-4.1'];
+    if (!allowed.includes(value.trim())) throw new BadRequestException('Unsupported AI model');
+    return value.trim();
+  }
+
+  private optionalDate(value: unknown) {
+    if (typeof value !== 'string' || !value.trim()) return undefined;
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) throw new BadRequestException('Invalid date');
+    return parsed;
   }
 }

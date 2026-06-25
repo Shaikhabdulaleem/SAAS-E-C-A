@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { promises as dns } from 'dns';
+import { Resolver } from 'dns/promises';
 import { DnsProviderType, Prisma } from '@prisma/client';
 import { ProviderLogsService } from './provider-logs.service';
 
@@ -47,7 +47,12 @@ export interface DomainVerificationConfig {
 
 @Injectable()
 export class DnsProviderService {
-  constructor(private readonly logs: ProviderLogsService) {}
+  private readonly dns: Resolver;
+
+  constructor(private readonly logs: ProviderLogsService) {
+    this.dns = new Resolver();
+    this.dns.setServers(['8.8.8.8', '1.1.1.1']);
+  }
 
   async createRecords(input: {
     tenantId: string;
@@ -131,9 +136,9 @@ export class DnsProviderService {
 
   async verify(domain: string, config: DomainVerificationConfig = {}) {
     const [txt, mx, tracking] = await Promise.allSettled([
-      dns.resolveTxt(domain),
-      dns.resolveMx(domain),
-      config.trackingDomain ? dns.resolveCname(config.trackingDomain) : Promise.resolve([]),
+      this.dns.resolveTxt(domain),
+      this.dns.resolveMx(domain),
+      config.trackingDomain ? this.dns.resolveCname(config.trackingDomain) : Promise.resolve([]),
     ]);
     const txtRows = txt.status === 'fulfilled' ? txt.value.map((row) => row.join('')) : [];
     const txtValues = txtRows.join(' ');
@@ -154,17 +159,17 @@ export class DnsProviderService {
     const recordType = (config.dkimType || 'TXT').toUpperCase();
 
     if (recordType === 'CNAME') {
-      const values = await dns.resolveCname(config.dkimHost).catch(() => []);
+      const values = await this.dns.resolveCname(config.dkimHost).catch(() => []);
       return this.matchesCname(values, config.dkimValue);
     }
 
-    const values = await dns.resolveTxt(config.dkimHost).catch(() => []);
+    const values = await this.dns.resolveTxt(config.dkimHost).catch(() => []);
     const expected = this.normalizeTxt(config.dkimValue);
     return values.some((row) => this.normalizeTxt(row.join('')) === expected);
   }
 
   private async hasDmarc(domain: string) {
-    const result = await dns.resolveTxt(`_dmarc.${domain}`).catch(() => []);
+    const result = await this.dns.resolveTxt(`_dmarc.${domain}`).catch(() => []);
     return result.flat().join(' ').includes('v=DMARC1');
   }
 

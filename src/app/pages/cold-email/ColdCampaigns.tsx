@@ -69,14 +69,19 @@ export function ColdCampaigns() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [prospectLists, setProspectLists] = useState<ProspectListOption[]>([]);
   const [mailboxes, setMailboxes] = useState<MailboxOption[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => { fetchData(); }, []);
 
   const fetchData = async () => {
     try {
+      setError(null);
       const result = await apiRequest<ColdCampaign[]>('/cold-email/campaigns');
-      setCampaigns(result);
-    } catch {} finally {
+      setCampaigns(Array.isArray(result) ? result : []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load campaigns');
+    } finally {
       setLoading(false);
     }
   };
@@ -87,9 +92,11 @@ export function ColdCampaigns() {
         apiRequest<ProspectListOption[]>('/cold-email/prospect-lists'),
         apiRequest<MailboxOption[]>('/cold-email/mailboxes'),
       ]);
-      setProspectLists(lists);
-      setMailboxes(mboxes);
-    } catch {}
+      setProspectLists(Array.isArray(lists) ? lists : []);
+      setMailboxes(Array.isArray(mboxes) ? mboxes : []);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to load form data');
+    }
   };
 
   const filteredCampaigns = campaigns.filter(c => filter === 'all' || c.status === filter);
@@ -135,36 +142,50 @@ export function ColdCampaigns() {
       setShowModal(false);
       setForm({ ...defaultForm });
       setErrors({});
-    } catch {}
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to create campaign');
+    }
   };
 
   const handleActivate = async (id: string) => {
     try {
+      setActionError(null);
       const updated = await apiRequest<ColdCampaign>(`/cold-email/campaigns/${id}/activate`, { method: 'POST' });
       setCampaigns(prev => prev.map(c => c.id === id ? updated : c));
-    } catch {}
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to activate campaign');
+    }
   };
 
   const handlePause = async (id: string) => {
     try {
+      setActionError(null);
       const updated = await apiRequest<ColdCampaign>(`/cold-email/campaigns/${id}/pause`, { method: 'POST' });
       setCampaigns(prev => prev.map(c => c.id === id ? updated : c));
-    } catch {}
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to pause campaign');
+    }
   };
 
   const handleDelete = async (id: string) => {
     if (!window.confirm('Delete this campaign?')) return;
     try {
+      setActionError(null);
       await apiRequest(`/cold-email/campaigns/${id}`, { method: 'DELETE' });
       setCampaigns(prev => prev.filter(c => c.id !== id));
-    } catch {}
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to delete campaign');
+    }
   };
 
   const handleDuplicate = async (id: string) => {
     try {
+      setActionError(null);
       const copy = await apiRequest<ColdCampaign>(`/cold-email/campaigns/${id}/duplicate`, { method: 'POST' });
       setCampaigns(prev => [copy, ...prev]);
-    } catch {}
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to duplicate campaign');
+    }
   };
 
   const openModal = () => {
@@ -182,6 +203,18 @@ export function ColdCampaigns() {
 
   return (
     <div className="max-w-7xl mx-auto space-y-5">
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-3 flex items-center justify-between">
+          <p className="text-sm text-red-700">{error}</p>
+          <Button variant="ghost" size="sm" onClick={() => { setError(null); fetchData(); }}>Retry</Button>
+        </div>
+      )}
+      {actionError && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-3 flex items-center justify-between">
+          <p className="text-sm text-red-700">{actionError}</p>
+          <button onClick={() => setActionError(null)} className="text-red-400 hover:text-red-600"><X className="h-4 w-4" /></button>
+        </div>
+      )}
       {showModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowModal(false)} />
@@ -380,7 +413,7 @@ export function ColdCampaigns() {
                       </div>
                       <p className="text-xs text-muted-foreground mt-0.5 flex items-center gap-1">
                         <Target className="h-3 w-3" />
-                        {campaign.goal.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                        {(campaign.goal ?? '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) || 'No goal set'}
                       </p>
                       <p className="text-xs text-muted-foreground/60 mt-0.5">{campaign.totalProspects} prospects</p>
                     </div>

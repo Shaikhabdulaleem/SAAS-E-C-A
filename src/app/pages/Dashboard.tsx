@@ -48,6 +48,7 @@ interface DashboardSummary {
   companies: number;
   openDeals: number;
   pipelineValue: number;
+  weightedPipeline: number;
   avgDealValue: number;
   campaigns: number;
   activities: number;
@@ -496,7 +497,7 @@ export function Dashboard() {
       value: formatCompactCurrency(summary?.pipelineValue ?? 0),
       subtext: `${summary?.openDeals ?? 0} active deals`,
       icon: DollarSign,
-      trend: `${Math.round(summary?.avgDealValue ?? 0).toLocaleString()} avg`,
+      trend: `Forecast: ${formatCompactCurrency(summary?.weightedPipeline ?? 0)}`,
       color: 'text-indigo-600',
       bg: 'bg-indigo-50',
     },

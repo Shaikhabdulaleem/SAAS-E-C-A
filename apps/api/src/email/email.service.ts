@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { CampaignStatus, ContactStatus, DnsRecordStatus, EmailEventType, JobStatus, Prisma, SuppressionSource } from '@prisma/client';
+import { CampaignStatus, ContactStatus, DnsRecordStatus, EmailEventType, EmailLinkPurpose, JobStatus, Prisma, SuppressionSource } from '@prisma/client';
 import { createHash, createVerify } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { EmailDeliveryService } from '../providers/services/email-delivery.service';
@@ -328,8 +328,8 @@ export class EmailService {
     return { success: true };
   }
 
-  async handleProviderEvents(body: unknown, headers: Record<string, string | string[] | undefined> = {}) {
-    this.verifySendGridWebhook(body, headers);
+  async handleProviderEvents(body: unknown, headers: Record<string, string | string[] | undefined> = {}, rawBody?: string | Buffer) {
+    this.verifySendGridWebhook(body, headers, rawBody);
     const events = Array.isArray(body) ? body : [body];
     let processed = 0;
     for (const event of events) {
@@ -405,7 +405,7 @@ export class EmailService {
   async exportSuppressions(tenantId: string) {
     const entries = await this.prisma.suppressionEntry.findMany({ where: { tenantId }, orderBy: { createdAt: 'desc' } });
     const header = 'email,source,reason,createdAt';
-    const rows = entries.map(e => `${e.email},${e.source},${(e.reason ?? '').replace(/,/g, ';')},${e.createdAt.toISOString()}`);
+    const rows = entries.map(e => [e.email, e.source, e.reason ?? '', e.createdAt.toISOString()].map(this.csvCell).join(','));
     return { csv: [header, ...rows].join('\n'), count: entries.length };
   }
 
@@ -419,7 +419,7 @@ export class EmailService {
   async handleUnsubscribe(token: string) {
     const tokenHash = this.hash(token);
     const record = await this.prisma.unsubscribeToken.findUnique({ where: { tokenHash } });
-    if (!record || (record.expiresAt && record.expiresAt.getTime() < Date.now())) throw new NotFoundException('Invalid unsubscribe token');
+    if (!record || record.purpose !== EmailLinkPurpose.unsubscribe || (record.expiresAt && record.expiresAt.getTime() < Date.now())) throw new NotFoundException('Invalid unsubscribe token');
     await this.addSuppression(record.tenantId, { email: record.email, source: SuppressionSource.unsubscribe, reason: 'Email unsubscribe link' });
     await this.logCompliance(record.tenantId, record.email, 'unsubscribe', 'email_link', { campaignId: record.campaignId }).catch(() => undefined);
     await this.prisma.unsubscribeToken.update({ where: { id: record.id }, data: { usedAt: new Date() } });
@@ -439,9 +439,15 @@ export class EmailService {
   }
 
   async trackEvent(type: string, token: string, meta: { userAgent?: string; ipAddress?: string; url?: string }) {
-    const event = await this.prisma.trackingEvent.findFirst({ where: { token } });
+    const event = await this.prisma.trackingEvent.findFirst({ where: { token, type: 'token' } });
     if (!event || !event.campaignId) throw new NotFoundException('Tracking token not found');
     const normalizedType = type === 'click' ? EmailEventType.click : EmailEventType.open;
+    if (type === 'click') {
+      const target = meta.url && /^https?:\/\//i.test(meta.url)
+        ? await this.prisma.trackingEvent.findFirst({ where: { token, type: 'link_target', url: meta.url } })
+        : null;
+      if (!target) throw new BadRequestException('Invalid tracked link destination');
+    }
     const eventKey = type === 'click'
       ? `${type}:${token}:${event.recipientId ?? event.email ?? ''}:${meta.url ?? ''}`
       : `${type}:${token}:${event.recipientId ?? event.email ?? ''}`;
@@ -707,7 +713,7 @@ export class EmailService {
       throw new BadRequestException('Only draft, scheduled, or partial failed campaigns can be queued');
     }
 
-    const contacts = await this.findAudienceContacts(tenantId, this.normalizeAudienceFilter(campaign.recipientFilter), 5000);
+    const contacts = await this.findAllAudienceContacts(tenantId, this.normalizeAudienceFilter(campaign.recipientFilter));
     if (!contacts.length) throw new BadRequestException('Campaign requires at least one CRM contact recipient');
     const suppressed = await this.prisma.suppressionEntry.findMany({
       where: { tenantId, email: { in: contacts.map((contact) => contact.email.toLowerCase()) } },
@@ -733,17 +739,16 @@ export class EmailService {
 
     await this.prisma.$transaction([
       this.prisma.campaignRecipient.deleteMany({ where: { campaignId } }),
-      this.prisma.campaignRecipient.createMany({ data: recipients }),
       this.prisma.emailCampaign.update({
         where: { id: campaignId },
         data: {
-          status: scheduledAt ? CampaignStatus.scheduled : CampaignStatus.sending,
           scheduledAt,
           totalRecipients: recipients.length,
           sentAt: null,
           completedAt: null,
           cancelledAt: null,
           lastError: null,
+          sendContinuationAt: null,
           openCount: 0,
           clickCount: 0,
           bounceCount: 0,
@@ -753,6 +758,9 @@ export class EmailService {
       this.prisma.emailEvent.deleteMany({ where: { campaignId } }),
       this.prisma.trackingEvent.deleteMany({ where: { tenantId, campaignId } }),
     ]);
+    for (let i = 0; i < recipients.length; i += 1000) {
+      await this.prisma.campaignRecipient.createMany({ data: recipients.slice(i, i + 1000) });
+    }
 
     const job = await this.jobs.enqueue({
       tenantId,
@@ -760,12 +768,17 @@ export class EmailService {
       name: scheduledAt ? 'email.campaign.scheduled_send' : 'email.campaign.send_now',
       payload: { campaignId },
       scheduledAt,
+      required: true,
     });
     await this.completeLaunchOnboarding(tenantId);
 
     return this.prisma.emailCampaign.update({
       where: { id: campaignId },
-      data: { sendJobId: job.id },
+      data: {
+        status: scheduledAt ? CampaignStatus.scheduled : CampaignStatus.sending,
+        sendJobId: job.id,
+        lastError: null,
+      },
       include: { recipients: true, events: true },
     });
   }
@@ -863,13 +876,33 @@ export class EmailService {
   }
 
   private async findAudienceContacts(tenantId: string, filter: AudienceFilter, take: number) {
+    return this.prisma.contact.findMany({ where: this.audienceWhere(tenantId, filter), orderBy: { createdAt: 'desc' }, take });
+  }
+
+  private async findAllAudienceContacts(tenantId: string, filter: AudienceFilter) {
+    const pageSize = 1000;
+    const contacts: Array<Awaited<ReturnType<EmailService['findAudienceContacts']>>[number]> = [];
+    for (let skip = 0; ; skip += pageSize) {
+      const page = await this.prisma.contact.findMany({
+        where: this.audienceWhere(tenantId, filter),
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: pageSize,
+      });
+      contacts.push(...page);
+      if (page.length < pageSize) break;
+    }
+    return contacts;
+  }
+
+  private audienceWhere(tenantId: string, filter: AudienceFilter): Prisma.ContactWhereInput {
     const where: Prisma.ContactWhereInput = { tenantId, marketingConsent: true };
     if (filter.mode === 'manual' && filter.contactIds?.length) where.id = { in: filter.contactIds };
     const statuses = filter.statuses?.filter((status): status is ContactStatus => Object.values(ContactStatus).includes(status as ContactStatus));
     if (statuses?.length) where.status = { in: statuses };
     if (filter.tags?.length) where.tags = { hasSome: filter.tags };
     if (filter.companyId) where.companyId = filter.companyId;
-    return this.prisma.contact.findMany({ where, orderBy: { createdAt: 'desc' }, take });
+    return where;
   }
 
   private async previewAudienceForFilter(tenantId: string, filter: AudienceFilter, take: number): Promise<AudiencePreviewResult> {
@@ -962,14 +995,42 @@ export class EmailService {
     };
   }
 
-  private verifySendGridWebhook(body: unknown, headers: Record<string, string | string[] | undefined>) {
+  private mergeBody(body: string, values: { firstName: string; lastName: string; email: string; company: string }) {
+    return body
+      .replace(/\{\{firstName\}\}/g, values.firstName)
+      .replace(/\{\{first_name\}\}/g, values.firstName)
+      .replace(/\{\{lastName\}\}/g, values.lastName)
+      .replace(/\{\{last_name\}\}/g, values.lastName)
+      .replace(/\{\{email\}\}/g, values.email)
+      .replace(/\{\{companyName\}\}/g, values.company)
+      .replace(/\{\{company\}\}/g, values.company);
+  }
+
+  private async getPurposeToken(token: string, purpose: EmailLinkPurpose) {
+    const tokenHash = this.hash(token);
+    const record = await this.prisma.unsubscribeToken.findUnique({ where: { tokenHash } });
+    if (!record || record.purpose !== purpose || record.usedAt || (record.expiresAt && record.expiresAt.getTime() < Date.now())) {
+      throw new NotFoundException('Invalid or expired token');
+    }
+    return record;
+  }
+
+  private csvCell(value: unknown) {
+    let text = value === null || value === undefined ? '' : String(value);
+    if (/^[=+\-@]/.test(text)) text = `'${text}`;
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+
+  private verifySendGridWebhook(_body: unknown, headers: Record<string, string | string[] | undefined>, rawBody?: string | Buffer) {
     const publicKey = process.env.SENDGRID_WEBHOOK_PUBLIC_KEY;
     if (!publicKey) return;
     const signature = this.header(headers, 'x-twilio-email-event-webhook-signature');
     const timestamp = this.header(headers, 'x-twilio-email-event-webhook-timestamp');
     if (!signature || !timestamp) throw new BadRequestException('Missing SendGrid webhook signature');
+    if (!rawBody) throw new BadRequestException('Raw body is required for SendGrid webhook signature validation');
     const verifier = createVerify('sha256');
-    verifier.update(timestamp + JSON.stringify(body));
+    verifier.update(timestamp);
+    verifier.update(Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(rawBody));
     verifier.end();
     const pem = publicKey.includes('BEGIN PUBLIC KEY') ? publicKey : `-----BEGIN PUBLIC KEY-----\n${publicKey}\n-----END PUBLIC KEY-----`;
     if (!verifier.verify(pem, signature, 'base64')) throw new BadRequestException('Invalid SendGrid webhook signature');
@@ -1217,7 +1278,7 @@ export class EmailService {
     const baseUrl = process.env.API_PUBLIC_URL ?? `http://localhost:${process.env.PORT ?? 3001}/api`;
     const confirmUrl = `${baseUrl}/email/events/confirm-optin/${token}`;
     await this.prisma.unsubscribeToken.create({
-      data: { tenantId, email: contact.email, tokenHash: this.hash(token), expiresAt: new Date(Date.now() + 7 * 86400000) },
+      data: { tenantId, email: contact.email, purpose: EmailLinkPurpose.opt_in, tokenHash: this.hash(token), expiresAt: new Date(Date.now() + 7 * 86400000) },
     });
     const html = `<p>Please confirm your subscription by clicking the link below:</p><p><a href="${confirmUrl}" style="display:inline-block;padding:12px 24px;background:#4f46e5;color:white;text-decoration:none;border-radius:6px;">Confirm Subscription</a></p><p>This link expires in 7 days.</p>`;
     await this.delivery.send({
@@ -1231,7 +1292,7 @@ export class EmailService {
   async confirmOptIn(token: string) {
     const tokenHash = this.hash(token);
     const record = await this.prisma.unsubscribeToken.findUnique({ where: { tokenHash } });
-    if (!record || (record.expiresAt && record.expiresAt.getTime() < Date.now())) throw new NotFoundException('Invalid or expired confirmation link');
+    if (!record || record.purpose !== EmailLinkPurpose.opt_in || (record.expiresAt && record.expiresAt.getTime() < Date.now())) throw new NotFoundException('Invalid or expired confirmation link');
     await this.prisma.contact.updateMany({
       where: { tenantId: record.tenantId, email: record.email.toLowerCase() },
       data: { marketingConsent: true, marketingConsentSource: 'double_optin', marketingConsentCapturedAt: new Date() },
@@ -1321,7 +1382,7 @@ export class EmailService {
     const recipients = await this.prisma.campaignRecipient.findMany({ where: { campaignId }, orderBy: { email: 'asc' } });
     const header = 'email,firstName,lastName,status,sentAt,openedAt,clickedAt,bouncedAt,variantId';
     const rows = recipients.map(r =>
-      [r.email, r.firstName ?? '', r.lastName ?? '', r.status, r.sentAt?.toISOString() ?? '', r.openedAt?.toISOString() ?? '', r.clickedAt?.toISOString() ?? '', r.bouncedAt?.toISOString() ?? '', r.variantId ?? ''].join(','),
+      [r.email, r.firstName ?? '', r.lastName ?? '', r.status, r.sentAt?.toISOString() ?? '', r.openedAt?.toISOString() ?? '', r.clickedAt?.toISOString() ?? '', r.bouncedAt?.toISOString() ?? '', r.variantId ?? ''].map(this.csvCell).join(','),
     );
     return { campaignName: campaign.name, csv: [header, ...rows].join('\n'), count: recipients.length };
   }
@@ -1342,10 +1403,45 @@ export class EmailService {
     return rendered?.html ?? selected.body ?? '<p>No content</p>';
   }
 
+  async viewInBrowserByToken(token: string) {
+    const record = await this.getPurposeToken(token, EmailLinkPurpose.view);
+    if (!record.campaignId) throw new NotFoundException('Invalid view token');
+    const campaign = await this.prisma.emailCampaign.findFirst({ where: { tenantId: record.tenantId, id: record.campaignId } });
+    if (!campaign) throw new NotFoundException('Campaign not found');
+    const recipient = record.recipientId
+      ? await this.prisma.campaignRecipient.findFirst({ where: { campaignId: record.campaignId, id: record.recipientId } })
+      : null;
+    const selected = resolveSelectedVariant(campaign);
+    const sampleBody = this.mergeBody(selected.body ?? '', {
+      firstName: recipient?.firstName ?? '',
+      lastName: recipient?.lastName ?? '',
+      email: recipient?.email ?? record.email,
+      company: campaign.fromName ?? '',
+    });
+    const rendered = await renderEmailWithTracking({
+      store: this.prisma,
+      body: sampleBody,
+      tenantId: record.tenantId,
+      campaignId: record.campaignId,
+      recipientId: record.recipientId ?? 'browser',
+      email: recipient?.email ?? record.email,
+      trackOpens: false,
+      trackClicks: false,
+      companyAddress: campaign.companyAddress,
+      subject: selected.subject,
+    });
+    return rendered?.html ?? sampleBody ?? '<p>No content</p>';
+  }
+
   // ── Preference Center ──
 
   async getPreferences(tenantId: string, email: string) {
     return this.prisma.subscriptionPreference.findMany({ where: { tenantId, email: email.toLowerCase() } });
+  }
+
+  async getPreferencesByToken(token: string) {
+    const record = await this.getPurposeToken(token, EmailLinkPurpose.preferences);
+    return this.getPreferences(record.tenantId, record.email);
   }
 
   async updatePreference(tenantId: string, email: string, category: string, subscribed: boolean, meta?: { ipAddress?: string; userAgent?: string }) {
@@ -1359,9 +1455,7 @@ export class EmailService {
   }
 
   async handlePreferenceCenterUpdate(token: string, preferences: Array<{ category: string; subscribed: boolean }>, meta?: { ipAddress?: string; userAgent?: string }) {
-    const tokenHash = this.hash(token);
-    const record = await this.prisma.unsubscribeToken.findUnique({ where: { tokenHash } });
-    if (!record) throw new NotFoundException('Invalid token');
+    const record = await this.getPurposeToken(token, EmailLinkPurpose.preferences);
     for (const pref of preferences) {
       await this.updatePreference(record.tenantId, record.email, pref.category, pref.subscribed, meta);
     }
@@ -1395,7 +1489,7 @@ export class EmailService {
     if (campaign.status !== CampaignStatus.paused && campaign.status !== CampaignStatus.partial_failed) throw new BadRequestException('Only paused or partial_failed campaigns can be resumed');
     if (!process.env.REDIS_URL) throw new BadRequestException('Redis is required for Email Marketing sending and scheduling');
     await this.prisma.emailCampaign.update({ where: { id: campaignId }, data: { status: CampaignStatus.sending, lastError: null } });
-    const job = await this.jobs.enqueue({ tenantId, queue: 'email-campaigns', name: 'email.campaign.resume', payload: { campaignId } });
+    const job = await this.jobs.enqueue({ tenantId, queue: 'email-campaigns', name: 'email.campaign.resume', payload: { campaignId }, required: true });
     return this.prisma.emailCampaign.update({ where: { id: campaignId }, data: { sendJobId: job.id }, include: { recipients: true, events: true } });
   }
 }

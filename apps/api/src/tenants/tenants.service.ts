@@ -188,7 +188,10 @@ export class TenantsService {
 
     await this.prisma.$transaction(async (tx) => {
       if (action === 'delete') {
-        const result = await tx.tenant.deleteMany({ where: { id: { in: ids } } });
+        const result = await tx.tenant.updateMany({
+          where: { id: { in: ids } },
+          data: { status: TenantStatus.cancelled, mrr: 0 },
+        });
         affected = result.count;
       } else if (action === 'activate') {
         const result = await tx.tenant.updateMany({
@@ -222,19 +225,26 @@ export class TenantsService {
         action,
         ids,
         affected,
-        params,
-      });
+        params: params as Prisma.InputJsonObject,
+      } as Prisma.InputJsonObject);
     });
 
     return { affected };
   }
 
-  async remove(tenantId: string, actorUserId: string) {
+  async remove(tenantId: string, actorUserId: string, hard = false) {
     await this.ensureTenant(tenantId);
 
     await this.prisma.$transaction(async (tx) => {
-      await tx.tenant.delete({ where: { id: tenantId } });
-      await this.audit(tx, actorUserId, tenantId, 'tenant.deleted', {});
+      if (hard) {
+        await tx.tenant.delete({ where: { id: tenantId } });
+      } else {
+        await tx.tenant.update({
+          where: { id: tenantId },
+          data: { status: TenantStatus.cancelled, mrr: 0, notes: `Soft-deleted at ${new Date().toISOString()}` },
+        });
+      }
+      await this.audit(tx, actorUserId, tenantId, hard ? 'tenant.hard_deleted' : 'tenant.soft_deleted', {});
     });
 
     return { success: true };
@@ -674,6 +684,48 @@ export class TenantsService {
       [PlanKey.enterprise]: 799,
     };
     return prices[plan];
+  }
+
+  async exportTenantData(tenantId: string, actorUserId: string) {
+    const tenant = await this.prisma.tenant.findUnique({
+      where: { id: tenantId },
+      include: { enabledServices: true, integrations: true },
+    });
+    if (!tenant) throw new NotFoundException('Tenant not found');
+
+    const [contacts, companies, deals, activities, campaigns, invoices, members] = await Promise.all([
+      this.prisma.contact.findMany({ where: { tenantId } }),
+      this.prisma.company.findMany({ where: { tenantId } }),
+      this.prisma.deal.findMany({ where: { tenantId } }),
+      this.prisma.activity.findMany({ where: { tenantId }, take: 5000 }),
+      this.prisma.emailCampaign.findMany({ where: { tenantId }, select: { id: true, name: true, status: true, createdAt: true, totalRecipients: true } }),
+      this.prisma.financeInvoice.findMany({ where: { tenantId, deletedAt: null } }),
+      this.prisma.tenantUser.findMany({ where: { tenantId }, include: { user: { select: { id: true, name: true, email: true } } } }),
+    ]);
+
+    await this.audit(this.prisma, actorUserId, tenantId, 'tenant.gdpr_export', {});
+
+    return {
+      exportedAt: new Date().toISOString(),
+      tenant: {
+        id: tenant.id,
+        companyName: tenant.companyName,
+        contactName: tenant.contactName,
+        email: tenant.email,
+        phone: tenant.phone,
+        industry: tenant.industry,
+        plan: tenant.plan,
+        status: tenant.status,
+        createdAt: tenant.createdAt,
+      },
+      members: members.map((m) => ({ role: m.role, user: m.user })),
+      contacts,
+      companies,
+      deals,
+      activities: activities.length,
+      campaigns,
+      invoices,
+    };
   }
 
   private audit(

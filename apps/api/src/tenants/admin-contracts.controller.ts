@@ -1,10 +1,12 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Param, Patch, Post, Query, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { UserRole } from '@prisma/client';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { AuthenticatedUser } from '../auth/types';
+import { documentUploadOptions, saveUploadedFile, deleteUploadedFile } from '../common/file-upload.util';
 import { AdminContractsService } from './admin-contracts.service';
 
 @Controller('admin/contracts')
@@ -29,6 +31,23 @@ export class AdminContractsController {
   @Delete(':id')
   remove(@Param('id') id: string, @CurrentUser() user: AuthenticatedUser) {
     return this.contracts.remove(id, user.id);
+  }
+
+  @Post(':id/document')
+  @UseInterceptors(FileInterceptor('document', documentUploadOptions()))
+  async uploadDocument(@Param('id') id: string, @UploadedFile() file: Express.Multer.File, @CurrentUser() user: AuthenticatedUser) {
+    if (!file) throw new BadRequestException('Document file is required');
+    const existing = await this.contracts.getById(id);
+    const documentUrl = saveUploadedFile(file, 'contracts');
+    if (existing?.documentUrl) deleteUploadedFile(existing.documentUrl);
+    return this.contracts.update(id, { documentUrl }, user.id);
+  }
+
+  @Delete(':id/document')
+  async removeDocument(@Param('id') id: string, @CurrentUser() user: AuthenticatedUser) {
+    const existing = await this.contracts.getById(id);
+    if (existing?.documentUrl) deleteUploadedFile(existing.documentUrl);
+    return this.contracts.update(id, { documentUrl: null }, user.id);
   }
 
   @Get('expiring')

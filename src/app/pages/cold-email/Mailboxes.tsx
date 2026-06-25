@@ -86,14 +86,19 @@ export function ColdMailboxes() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [testingSmtp, setTestingSmtp] = useState(false);
   const [smtpTestResult, setSmtpTestResult] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => { fetchData(); }, []);
 
   const fetchData = async () => {
     try {
+      setError(null);
       const result = await apiRequest<Mailbox[]>('/cold-email/mailboxes');
-      setMailboxes(result);
-    } catch {} finally {
+      setMailboxes(Array.isArray(result) ? result : []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load mailboxes');
+    } finally {
       setLoading(false);
     }
   };
@@ -111,6 +116,7 @@ export function ColdMailboxes() {
   const validate = () => {
     const e: Record<string, string> = {};
     if (!form.email.trim()) e.email = 'Email address is required';
+    else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim())) e.email = 'Invalid email address format';
     if (!form.fromName.trim()) e.fromName = 'From name is required';
     if (form.provider === 'custom_smtp') {
       if (!form.smtpHost.trim()) e.smtpHost = 'SMTP host is required';
@@ -141,7 +147,9 @@ export function ColdMailboxes() {
       setEditingId(null);
       setForm({ ...defaultForm });
       setErrors({});
-    } catch {}
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to save mailbox');
+    }
   };
 
   const handleEdit = (mailbox: Mailbox) => {
@@ -187,29 +195,40 @@ export function ColdMailboxes() {
     try {
       const updated = await apiRequest<Mailbox>(`/cold-email/mailboxes/${id}/toggle-warmup`, { method: 'POST' });
       setMailboxes(prev => prev.map(m => m.id === id ? updated : m));
-    } catch {}
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to toggle warmup');
+    }
   };
 
   const handlePause = async (id: string) => {
     try {
+      setActionError(null);
       const updated = await apiRequest<Mailbox>(`/cold-email/mailboxes/${id}/pause`, { method: 'POST' });
       setMailboxes(prev => prev.map(m => m.id === id ? updated : m));
-    } catch {}
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to pause mailbox');
+    }
   };
 
   const handleActivate = async (id: string) => {
     try {
+      setActionError(null);
       const updated = await apiRequest<Mailbox>(`/cold-email/mailboxes/${id}/activate`, { method: 'POST' });
       setMailboxes(prev => prev.map(m => m.id === id ? updated : m));
-    } catch {}
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to activate mailbox');
+    }
   };
 
   const handleDelete = async (id: string) => {
     if (!window.confirm('Delete this mailbox?')) return;
     try {
+      setActionError(null);
       await apiRequest(`/cold-email/mailboxes/${id}`, { method: 'DELETE' });
       setMailboxes(prev => prev.filter(m => m.id !== id));
-    } catch {}
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to delete mailbox');
+    }
   };
 
   if (loading) {
@@ -222,6 +241,12 @@ export function ColdMailboxes() {
 
   return (
     <div className="max-w-7xl mx-auto space-y-5">
+      {(error || actionError) && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-3 flex items-center justify-between">
+          <p className="text-sm text-red-700">{error || actionError}</p>
+          <button onClick={() => { setError(null); setActionError(null); }} className="text-red-400 hover:text-red-600"><X className="h-4 w-4" /></button>
+        </div>
+      )}
       {showModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowModal(false)} />

@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Headers, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Headers, Param, Post, Req, UseGuards } from '@nestjs/common';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { AuthenticatedUser } from '../auth/types';
@@ -36,8 +36,18 @@ export class BillingController {
   }
 
   @Get('usage')
-  usage(@CurrentUser() user: AuthenticatedUser, @Query() query: Record<string, string>, @Headers('x-tenant-id') selectedTenantId?: string) {
-    return this.billing.usage(resolveTenantId(user, selectedTenantId), query);
+  usage(@CurrentUser() user: AuthenticatedUser, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.billing.usage(resolveTenantId(user, selectedTenantId), {});
+  }
+
+  @Post('change-plan')
+  changePlan(@CurrentUser() user: AuthenticatedUser, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.billing.changePlan(resolveTenantId(user, selectedTenantId), body);
+  }
+
+  @Delete('payment-methods/:id')
+  deletePaymentMethod(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.billing.deletePaymentMethod(resolveTenantId(user, selectedTenantId), id);
   }
 }
 

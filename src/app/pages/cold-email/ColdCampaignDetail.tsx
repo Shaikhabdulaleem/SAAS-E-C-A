@@ -32,7 +32,7 @@ interface CampaignMailbox {
 }
 
 interface CampaignAnalytics {
-  steps: {
+  steps?: {
     stepNumber: number;
     sent: number;
     opens: number;
@@ -46,7 +46,8 @@ interface ColdCampaignFull {
   name: string;
   goal: string;
   status: 'draft' | 'active' | 'paused' | 'completed' | 'error';
-  prospectCount: number;
+  totalProspects: number;
+  prospectCount?: number;
   sentCount: number;
   openCount: number;
   replyCount: number;
@@ -91,6 +92,7 @@ export function ColdCampaignDetail() {
   const [templates, setTemplates] = useState<Array<{ id: string; name: string; category: string; steps: any[] }>>([]);
   const [testSending, setTestSending] = useState(false);
   const [testMessage, setTestMessage] = useState('');
+  const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => { fetchData(); }, [id]);
 
@@ -102,7 +104,9 @@ export function ColdCampaignDetail() {
       ]);
       setCampaign(campaignData);
       setAnalytics(analyticsData);
-    } catch {} finally {
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to load campaign');
+    } finally {
       setLoading(false);
     }
   };
@@ -123,7 +127,8 @@ export function ColdCampaignDetail() {
     if (Object.keys(errs).length > 0) { setErrors(errs); return; }
 
     if (editingStepIndex !== null && campaign) {
-      const updatedSteps = campaign.steps.map((s, i) =>
+      const currentSteps = Array.isArray(campaign.steps) ? campaign.steps : [];
+      const updatedSteps = currentSteps.map((s, i) =>
         i === editingStepIndex
           ? { ...stepForm, stepOrder: i }
           : { subject: s.subject, body: s.body, delayDays: s.delayDays, useThreading: s.useThreading, stepOrder: i }
@@ -138,7 +143,9 @@ export function ColdCampaignDetail() {
         setEditingStepIndex(null);
         setStepForm({ ...defaultStepForm });
         setErrors({});
-      } catch {}
+      } catch (err) {
+        setActionError(err instanceof Error ? err.message : 'Failed to update step');
+      }
       return;
     }
 
@@ -151,12 +158,15 @@ export function ColdCampaignDetail() {
       setShowStepModal(false);
       setStepForm({ ...defaultStepForm });
       setErrors({});
-    } catch {}
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to add step');
+    }
   };
 
   const handleEditStep = (index: number) => {
     if (!campaign) return;
-    const step = campaign.steps[index];
+    const step = (Array.isArray(campaign.steps) ? campaign.steps : [])[index];
+    if (!step) return;
     setStepForm({ subject: step.subject, body: step.body, delayDays: step.delayDays, useThreading: step.useThreading });
     setEditingStepIndex(index);
     setShowStepModal(true);
@@ -164,7 +174,8 @@ export function ColdCampaignDetail() {
 
   const handleDeleteStep = async (index: number) => {
     if (!campaign || !window.confirm('Delete this step?')) return;
-    const remaining = campaign.steps.filter((_, i) => i !== index).map((s, i) => ({
+    const currentSteps = Array.isArray(campaign.steps) ? campaign.steps : [];
+    const remaining = currentSteps.filter((_, i) => i !== index).map((s, i) => ({
       subject: s.subject, body: s.body, delayDays: s.delayDays, useThreading: s.useThreading, stepOrder: i,
     }));
     try {
@@ -173,7 +184,9 @@ export function ColdCampaignDetail() {
         body: JSON.stringify({ steps: remaining }),
       });
       setCampaign(updated);
-    } catch {}
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to delete step');
+    }
   };
 
   const handleTestSend = async () => {
@@ -213,7 +226,9 @@ export function ColdCampaignDetail() {
         await fetchData();
       }
       setShowAiWriter(false); setAiProduct(''); setAiAudience('');
-    } catch {} finally { setAiGenerating(false); }
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'AI generation failed');
+    } finally { setAiGenerating(false); }
   };
 
   const handleLoadTemplate = async (template: any) => {
@@ -225,11 +240,12 @@ export function ColdCampaignDetail() {
   };
 
   const handleSaveAsTemplate = async () => {
-    if (!campaign?.steps?.length) return;
+    const currentSteps = Array.isArray(campaign?.steps) ? campaign.steps : [];
+    if (!currentSteps.length) return;
     const name = window.prompt('Template name:');
     if (!name) return;
     await apiRequest('/cold-email/sequence-templates', {
-      method: 'POST', body: JSON.stringify({ name, steps: campaign.steps.map(s => ({ subject: s.subject, body: s.body, delayDays: s.delayDays, useThreading: s.useThreading })) }),
+      method: 'POST', body: JSON.stringify({ name, steps: currentSteps.map(s => ({ subject: s.subject, body: s.body, delayDays: s.delayDays, useThreading: s.useThreading })) }),
     });
   };
 
@@ -243,14 +259,19 @@ export function ColdCampaignDetail() {
     try {
       const updated = await apiRequest<ColdCampaignFull>(`/cold-email/campaigns/${id}/activate`, { method: 'POST' });
       setCampaign(updated);
-    } catch {}
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to activate campaign');
+    }
   };
 
   const handlePause = async () => {
     try {
+      setActionError(null);
       const updated = await apiRequest<ColdCampaignFull>(`/cold-email/campaigns/${id}/pause`, { method: 'POST' });
       setCampaign(updated);
-    } catch {}
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to pause campaign');
+    }
   };
 
   const handleDelete = async () => {
@@ -258,7 +279,9 @@ export function ColdCampaignDetail() {
     try {
       await apiRequest(`/cold-email/campaigns/${id}`, { method: 'DELETE' });
       window.location.href = '/cold-email/campaigns';
-    } catch {}
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to delete campaign');
+    }
   };
 
   if (loading) {
@@ -283,14 +306,29 @@ export function ColdCampaignDetail() {
     );
   }
 
-  const cfg = statusConfig[campaign.status];
+  const cfg = statusConfig[campaign.status] ?? statusConfig.draft;
   const StatusIcon = cfg.icon;
-  const openRate = campaign.sentCount > 0 ? (campaign.openCount / campaign.sentCount) * 100 : 0;
-  const replyRate = campaign.sentCount > 0 ? (campaign.replyCount / campaign.sentCount) * 100 : 0;
-  const bounceRate = campaign.sentCount > 0 ? (campaign.bounceCount / campaign.sentCount) * 100 : 0;
+  const prospectCount = campaign.prospectCount ?? campaign.totalProspects ?? 0;
+  const sentCount = campaign.sentCount ?? 0;
+  const openCount = campaign.openCount ?? 0;
+  const replyCount = campaign.replyCount ?? 0;
+  const bounceCount = campaign.bounceCount ?? 0;
+  const positiveReplyCount = campaign.positiveReplyCount ?? 0;
+  const openRate = sentCount > 0 ? (openCount / sentCount) * 100 : 0;
+  const replyRate = sentCount > 0 ? (replyCount / sentCount) * 100 : 0;
+  const bounceRate = sentCount > 0 ? (bounceCount / sentCount) * 100 : 0;
+  const campaignSteps = Array.isArray(campaign.steps) ? campaign.steps : [];
+  const campaignMailboxes = Array.isArray(campaign.mailboxes) ? campaign.mailboxes : [];
+  const analyticsSteps = Array.isArray(analytics?.steps) ? analytics.steps : [];
 
   return (
     <div className="max-w-7xl mx-auto space-y-5">
+      {actionError && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-3 flex items-center justify-between">
+          <p className="text-sm text-red-700">{actionError}</p>
+          <button onClick={() => setActionError(null)} className="text-red-400 hover:text-red-600"><X className="h-4 w-4" /></button>
+        </div>
+      )}
       {showStepModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowStepModal(false)} />
@@ -298,7 +336,7 @@ export function ColdCampaignDetail() {
             <div className="flex items-center justify-between px-6 py-4 border-b border-border sticky top-0 bg-background rounded-t-2xl z-10">
               <div>
                 <h2 className="text-base font-semibold text-foreground">{editingStepIndex !== null ? 'Edit Step' : 'Add Step'}</h2>
-                <p className="text-xs text-muted-foreground mt-0.5">{editingStepIndex !== null ? `Editing step ${editingStepIndex + 1}` : `Step ${(campaign.steps?.length ?? 0) + 1} in the sequence`}</p>
+                <p className="text-xs text-muted-foreground mt-0.5">{editingStepIndex !== null ? `Editing step ${editingStepIndex + 1}` : `Step ${campaignSteps.length + 1} in the sequence`}</p>
               </div>
               <button onClick={() => setShowStepModal(false)} className="p-1.5 rounded-md hover:bg-muted text-muted-foreground transition-colors">
                 <X className="h-4 w-4" />
@@ -405,7 +443,7 @@ export function ColdCampaignDetail() {
             </div>
             <p className="text-sm text-muted-foreground mt-0.5 flex items-center gap-1">
               <Target className="h-3.5 w-3.5" />
-              {campaign.goal.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+              {(campaign.goal ?? '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) || 'No goal set'}
             </p>
           </div>
         </div>
@@ -430,11 +468,11 @@ export function ColdCampaignDetail() {
 
       <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
         {[
-          { label: 'Total Prospects', value: campaign.prospectCount.toLocaleString(), icon: Users, color: 'text-indigo-600', bg: 'bg-indigo-50' },
-          { label: 'Emails Sent', value: campaign.sentCount.toLocaleString(), icon: Send, color: 'text-violet-600', bg: 'bg-violet-50' },
+          { label: 'Total Prospects', value: prospectCount.toLocaleString(), icon: Users, color: 'text-indigo-600', bg: 'bg-indigo-50' },
+          { label: 'Emails Sent', value: sentCount.toLocaleString(), icon: Send, color: 'text-violet-600', bg: 'bg-violet-50' },
           { label: 'Open Rate', value: `${openRate.toFixed(1)}%`, icon: Eye, color: 'text-sky-600', bg: 'bg-sky-50' },
           { label: 'Reply Rate', value: `${replyRate.toFixed(1)}%`, icon: MessageSquare, color: 'text-emerald-600', bg: 'bg-emerald-50' },
-          { label: 'Positive Replies', value: campaign.positiveReplyCount.toLocaleString(), icon: ThumbsUp, color: 'text-green-600', bg: 'bg-green-50' },
+          { label: 'Positive Replies', value: positiveReplyCount.toLocaleString(), icon: ThumbsUp, color: 'text-green-600', bg: 'bg-green-50' },
           { label: 'Bounce Rate', value: `${bounceRate.toFixed(1)}%`, icon: AlertTriangle, color: 'text-red-600', bg: 'bg-red-50' },
         ].map(stat => (
           <Card key={stat.label} className="p-0">
@@ -460,12 +498,12 @@ export function ColdCampaignDetail() {
               <div className="flex items-center justify-between">
                 <div>
                   <CardTitle className="text-base">Sequence Steps</CardTitle>
-                  <CardDescription>{campaign.steps?.length ?? 0} steps in this sequence</CardDescription>
+                  <CardDescription>{campaignSteps.length} steps in this sequence</CardDescription>
                 </div>
                 <div className="flex gap-2">
                   <Button size="sm" variant="outline" onClick={() => void loadTemplates()}>Templates</Button>
                   <Button size="sm" variant="outline" onClick={() => setShowAiWriter(true)}>AI Write</Button>
-                  {campaign.steps?.length > 0 && <Button size="sm" variant="outline" onClick={() => void handleSaveAsTemplate()}>Save Template</Button>}
+                  {campaignSteps.length > 0 && <Button size="sm" variant="outline" onClick={() => void handleSaveAsTemplate()}>Save Template</Button>}
                   <Button size="sm" onClick={() => setShowStepModal(true)}>
                     <Plus className="h-4 w-4 mr-1.5" />Add Step
                   </Button>
@@ -473,8 +511,8 @@ export function ColdCampaignDetail() {
               </div>
             </CardHeader>
             <CardContent className="space-y-3">
-              {campaign.steps && campaign.steps.length > 0 ? (
-                campaign.steps.map((step, index) => (
+              {campaignSteps.length > 0 ? (
+                campaignSteps.map((step, index) => (
                   <div key={step.id}>
                     {index > 0 && (
                       <div className="flex items-center gap-2 py-2 px-4">
@@ -544,7 +582,7 @@ export function ColdCampaignDetail() {
             </CardContent>
           </Card>
 
-          {analytics && analytics.steps.length > 0 && (
+          {analyticsSteps.length > 0 && (
             <Card>
               <CardHeader className="pb-2">
                 <CardTitle className="text-base">Step-by-Step Analytics</CardTitle>
@@ -565,22 +603,26 @@ export function ColdCampaignDetail() {
                       </tr>
                     </thead>
                     <tbody>
-                      {analytics.steps.map(step => {
-                        const stepOpenRate = step.sent > 0 ? (step.opens / step.sent) * 100 : 0;
-                        const stepReplyRate = step.sent > 0 ? (step.replies / step.sent) * 100 : 0;
+                      {analyticsSteps.map(step => {
+                        const sSent = step.sent ?? 0;
+                        const sOpens = step.opens ?? 0;
+                        const sReplies = step.replies ?? 0;
+                        const sBounces = step.bounces ?? 0;
+                        const stepOpenRate = sSent > 0 ? (sOpens / sSent) * 100 : 0;
+                        const stepReplyRate = sSent > 0 ? (sReplies / sSent) * 100 : 0;
                         return (
                           <tr key={step.stepNumber} className="border-b border-border last:border-0 hover:bg-muted/50">
                             <td className="px-4 py-3 font-medium text-foreground">Step {step.stepNumber}</td>
-                            <td className="px-4 py-3 text-right text-foreground">{step.sent.toLocaleString()}</td>
-                            <td className="px-4 py-3 text-right text-foreground">{step.opens.toLocaleString()}</td>
+                            <td className="px-4 py-3 text-right text-foreground">{sSent.toLocaleString()}</td>
+                            <td className="px-4 py-3 text-right text-foreground">{sOpens.toLocaleString()}</td>
                             <td className="px-4 py-3 text-right">
                               <span className="text-sky-600 font-medium">{stepOpenRate.toFixed(1)}%</span>
                             </td>
-                            <td className="px-4 py-3 text-right text-foreground">{step.replies.toLocaleString()}</td>
+                            <td className="px-4 py-3 text-right text-foreground">{sReplies.toLocaleString()}</td>
                             <td className="px-4 py-3 text-right">
                               <span className="text-emerald-600 font-medium">{stepReplyRate.toFixed(1)}%</span>
                             </td>
-                            <td className="px-4 py-3 text-right text-red-600">{step.bounces.toLocaleString()}</td>
+                            <td className="px-4 py-3 text-right text-red-600">{sBounces.toLocaleString()}</td>
                           </tr>
                         );
                       })}
@@ -596,11 +638,11 @@ export function ColdCampaignDetail() {
           <Card>
             <CardHeader className="pb-2">
               <CardTitle className="text-base">Connected Mailboxes</CardTitle>
-              <CardDescription>{campaign.mailboxes?.length ?? 0} mailboxes assigned</CardDescription>
+              <CardDescription>{campaignMailboxes.length} mailboxes assigned</CardDescription>
             </CardHeader>
             <CardContent className="space-y-2">
-              {campaign.mailboxes && campaign.mailboxes.length > 0 ? (
-                campaign.mailboxes.map(mb => (
+              {campaignMailboxes.length > 0 ? (
+                campaignMailboxes.map(mb => (
                   <div key={mb.id} className="flex items-center gap-3 p-2.5 rounded-lg border border-border">
                     <div className="p-1.5 rounded-md bg-indigo-50">
                       <Mail className="h-3.5 w-3.5 text-indigo-600" />
@@ -625,7 +667,7 @@ export function ColdCampaignDetail() {
               <CardTitle className="text-base">Campaign Actions</CardTitle>
             </CardHeader>
             <CardContent className="space-y-2">
-              {campaign.steps?.length > 0 && (
+              {campaignSteps.length > 0 && (
                 <Button variant="outline" size="sm" className="w-full justify-start" onClick={() => setShowTestSend(!showTestSend)}>
                   <TestTube className="h-4 w-4 mr-2" />
                   Send Test Email
@@ -644,8 +686,8 @@ export function ColdCampaignDetail() {
                 <div className="space-y-1.5 p-3 rounded-lg border bg-muted/20 mb-2">
                   <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Pre-flight Checklist</p>
                   {[
-                    { label: 'Steps configured', ok: (campaign.steps?.length ?? 0) > 0 },
-                    { label: 'Mailboxes assigned', ok: (campaign.mailboxes?.length ?? 0) > 0 },
+                    { label: 'Steps configured', ok: campaignSteps.length > 0 },
+                    { label: 'Mailboxes assigned', ok: campaignMailboxes.length > 0 },
                     { label: 'Prospect list linked', ok: campaign.prospectCount > 0 },
                   ].map(item => (
                     <div key={item.label} className="flex items-center gap-2 text-xs">

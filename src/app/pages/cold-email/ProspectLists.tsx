@@ -48,14 +48,19 @@ export function ProspectLists() {
   const [createName, setCreateName] = useState('');
   const [createError, setCreateError] = useState('');
   const [bulkText, setBulkText] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => { fetchData(); }, []);
 
   const fetchData = async () => {
     try {
+      setError(null);
       const result = await apiRequest<ProspectList[]>('/cold-email/prospect-lists');
-      setLists(result);
-    } catch {} finally {
+      setLists(Array.isArray(result) ? result : []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load prospect lists');
+    } finally {
       setLoading(false);
     }
   };
@@ -77,7 +82,9 @@ export function ProspectLists() {
       setShowCreateModal(false);
       setCreateName('');
       setCreateError('');
-    } catch {}
+    } catch (err) {
+      setCreateError(err instanceof Error ? err.message : 'Failed to create list');
+    }
   };
 
   const handleDeleteList = async (id: string) => {
@@ -85,16 +92,21 @@ export function ProspectLists() {
     try {
       await apiRequest(`/cold-email/prospect-lists/${id}`, { method: 'DELETE' });
       setLists(prev => prev.filter(l => l.id !== id));
-    } catch {}
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to delete list');
+    }
   };
 
   const handleViewProspects = async (id: string) => {
     setViewingListId(id);
     setProspectsLoading(true);
     try {
-      const result = await apiRequest<Prospect[]>(`/cold-email/prospect-lists/${id}/prospects`);
-      setProspects(result);
-    } catch {} finally {
+      const result = await apiRequest<{ data: Prospect[] } | Prospect[]>(`/cold-email/prospect-lists/${id}/prospects`);
+      const data = Array.isArray(result) ? result : (result && typeof result === 'object' && 'data' in result ? (result as any).data : []);
+      setProspects(Array.isArray(data) ? data : []);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to load prospects');
+    } finally {
       setProspectsLoading(false);
     }
   };
@@ -105,12 +117,15 @@ export function ProspectLists() {
       await apiRequest(`/cold-email/prospect-lists/${listId}/prospects/${prospectId}`, { method: 'DELETE' });
       setProspects(prev => prev.filter(prospect => prospect.id !== prospectId));
       await fetchData();
-    } catch {}
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to delete prospect');
+    }
   };
 
   const handleExportCsv = async (listId: string) => {
     try {
-      const prospects = await apiRequest<Prospect[]>(`/cold-email/prospect-lists/${listId}/prospects`);
+      const result = await apiRequest<{ data: Prospect[] } | Prospect[]>(`/cold-email/prospect-lists/${listId}/prospects`);
+      const prospects = Array.isArray(result) ? result : result.data ?? [];
       const header = 'email,firstName,lastName,company,jobTitle,status';
       const rows = prospects.map(p => `${p.email},${p.firstName ?? ''},${p.lastName ?? ''},${p.companyName ?? ''},${p.jobTitle ?? ''},${p.validationStatus}`);
       const csv = [header, ...rows].join('\n');
@@ -123,14 +138,19 @@ export function ProspectLists() {
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-    } catch {}
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to export CSV');
+    }
   };
 
   const handleAddProspects = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!showAddProspectsModal || !bulkText.trim()) return;
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     const lines = bulkText.trim().split('\n').filter(l => l.trim());
-    const prospects = lines.map(line => {
+    // Skip header row if first line looks like column headers
+    const startIndex = lines.length > 0 && /^(email|e-mail)/i.test(lines[0].split(',')[0]?.trim() ?? '') ? 1 : 0;
+    const prospects = lines.slice(startIndex).map(line => {
       const parts = line.split(',').map(p => p.trim());
       return {
         email: parts[0] || '',
@@ -139,16 +159,24 @@ export function ProspectLists() {
         companyName: parts[3] || '',
         jobTitle: parts[4] || '',
       };
-    });
+    }).filter(p => emailRegex.test(p.email));
+    if (prospects.length === 0) {
+      setActionError('No valid email addresses found. Format: email,firstName,lastName,company,jobTitle (one per line)');
+      return;
+    }
     try {
-      await apiRequest(`/cold-email/prospect-lists/${showAddProspectsModal}/prospects`, {
+      setActionError(null);
+      const result = await apiRequest<{ created: number; skipped: number; suppressed: number }>(`/cold-email/prospect-lists/${showAddProspectsModal}/prospects`, {
         method: 'POST',
         body: JSON.stringify({ prospects }),
       });
+      setActionError(null);
       setShowAddProspectsModal(null);
       setBulkText('');
       fetchData();
-    } catch {}
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to add prospects');
+    }
   };
 
   if (loading) {
@@ -230,6 +258,12 @@ export function ProspectLists() {
 
   return (
     <div className="max-w-7xl mx-auto space-y-5">
+      {(error || actionError) && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-3 flex items-center justify-between">
+          <p className="text-sm text-red-700">{error || actionError}</p>
+          <button onClick={() => { setError(null); setActionError(null); }} className="text-red-400 hover:text-red-600"><X className="h-4 w-4" /></button>
+        </div>
+      )}
       {showCreateModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowCreateModal(false)} />

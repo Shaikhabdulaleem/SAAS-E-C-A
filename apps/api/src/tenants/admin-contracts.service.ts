@@ -27,6 +27,10 @@ export class AdminContractsService {
     return { items, pagination: { page, pageSize, total } };
   }
 
+  async getById(id: string) {
+    return this.prisma.tenantContract.findUnique({ where: { id } });
+  }
+
   async create(data: Record<string, unknown>, actorUserId: string) {
     const contract = await this.prisma.tenantContract.create({
       data: {

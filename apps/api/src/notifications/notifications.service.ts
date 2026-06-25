@@ -60,6 +60,13 @@ export class NotificationsService {
     return this.preferences(tenantId, userId);
   }
 
+  async getUnreadCount(tenantId: string, userId: string) {
+    const count = await this.prisma.notification.count({
+      where: { tenantId, OR: [{ userId }, { userId: null }], readAt: null },
+    });
+    return { count };
+  }
+
   async create(input: { tenantId: string; userId?: string; type: NotificationType; title: string; body?: string; metadata?: Record<string, unknown> }) {
     if (input.userId) {
       const pref = await this.prisma.notificationPreference.findUnique({

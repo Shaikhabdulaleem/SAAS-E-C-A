@@ -1,10 +1,13 @@
-import { BadRequestException, Body, Controller, Delete, Get, Param, Patch, Post, Headers, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Param, Patch, Post, Headers, Query, Res, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { UserRole } from '@prisma/client';
+import { Response } from 'express';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { RequireService } from '../auth/decorators/required-service.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { ServiceAccessGuard } from '../auth/guards/service-access.guard';
 import { AuthenticatedUser } from '../auth/types';
+import { imageUploadOptions, saveUploadedFile, deleteUploadedFile } from '../common/file-upload.util';
 import { ProvisioningService } from './provisioning.service';
 
 function tenantId(user: AuthenticatedUser, selectedTenantId?: string) {
@@ -56,6 +59,11 @@ export class ProvisioningController {
   @Get('providers')
   listProviders(@CurrentUser() user: AuthenticatedUser, @Headers('x-tenant-id') selectedTenantId?: string) {
     return this.provisioning.listProviders(tenantId(user, selectedTenantId));
+  }
+
+  @Get('providers/google/auth-url')
+  getGoogleAuthUrl(@CurrentUser() user: AuthenticatedUser, @Headers('x-tenant-id') selectedTenantId?: string) {
+    return this.provisioning.getGoogleOAuthUrl(tenantId(user, selectedTenantId));
   }
 
   @Delete('providers/:id')
@@ -143,6 +151,25 @@ export class ProvisioningController {
   @Patch('personas/:id')
   updatePersona(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Body() body: Record<string, unknown>, @Headers('x-tenant-id') selectedTenantId?: string) {
     return this.provisioning.updatePersona(tenantId(user, selectedTenantId), id, body);
+  }
+
+  @Post('personas/:id/photo')
+  @UseInterceptors(FileInterceptor('photo', imageUploadOptions()))
+  async uploadPersonaPhoto(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @UploadedFile() file: Express.Multer.File, @Headers('x-tenant-id') selectedTenantId?: string) {
+    if (!file) throw new BadRequestException('Photo file is required');
+    const tid = tenantId(user, selectedTenantId);
+    const existing = await this.provisioning.getPersona(tid, id);
+    const profilePhoto = saveUploadedFile(file, 'profile-photos');
+    if (existing?.profilePhoto) deleteUploadedFile(existing.profilePhoto);
+    return this.provisioning.updatePersona(tid, id, { profilePhoto });
+  }
+
+  @Delete('personas/:id/photo')
+  async removePersonaPhoto(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Headers('x-tenant-id') selectedTenantId?: string) {
+    const tid = tenantId(user, selectedTenantId);
+    const existing = await this.provisioning.getPersona(tid, id);
+    if (existing?.profilePhoto) deleteUploadedFile(existing.profilePhoto);
+    return this.provisioning.updatePersona(tid, id, { profilePhoto: null });
   }
 
   @Delete('personas/:id')
