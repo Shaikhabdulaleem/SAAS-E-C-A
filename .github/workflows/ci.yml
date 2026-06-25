@@ -31,15 +31,15 @@ jobs:
         run: pnpm install --no-frozen-lockfile
 
       - name: Generate Prisma client
-        run: cd apps/api && npx prisma generate
+        run: cd apps/api && pnpm exec prisma generate
 
       - name: Typecheck API
-        run: cd apps/api && npx tsc --noEmit
+        run: cd apps/api && pnpm exec tsc --noEmit
 
       - name: Build frontend
         env:
           VITE_API_URL: http://localhost:3001/api
-        run: npx vite build
+        run: pnpm exec vite build
 
   # ── API Tests ──────────────────────────────────────────
   test:
@@ -92,13 +92,13 @@ jobs:
         run: pnpm install --no-frozen-lockfile
 
       - name: Generate Prisma client
-        run: cd apps/api && npx prisma generate
+        run: cd apps/api && pnpm exec prisma generate
 
       - name: Run migrations
-        run: cd apps/api && npx prisma migrate deploy
+        run: cd apps/api && pnpm exec prisma migrate deploy
 
       - name: Run tests
-        run: cd apps/api && npx jest --passWithNoTests
+        run: cd apps/api && pnpm exec jest --passWithNoTests
 
   # ── Security Audit ─────────────────────────────────────
   audit:
