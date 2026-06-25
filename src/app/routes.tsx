@@ -7,6 +7,10 @@ import { ServiceRoute } from "./components/ServiceRoute";
 import type { ServiceKey } from "./contexts/TenantContext";
 import { Login } from "./pages/Login";
 import { InviteAccept } from "./pages/InviteAccept";
+import { VerifyEmail } from "./pages/VerifyEmail";
+import { PasswordReset } from "./pages/PasswordReset";
+import { TermsOfService } from "./pages/legal/TermsOfService";
+import { PrivacyPolicy } from "./pages/legal/PrivacyPolicy";
 import { Dashboard } from "./pages/Dashboard";
 import { ContactsAndCompanies } from "./pages/crm/ContactsAndCompanies";
 import { ContactDetail } from "./pages/crm/ContactDetail";
@@ -84,6 +88,10 @@ function withService(service: ServiceKey, children: ReactNode) {
 export const router = createBrowserRouter([
   { path: "/login", Component: Login },
   { path: "/invite/:token", Component: InviteAccept },
+  { path: "/verify-email", Component: VerifyEmail },
+  { path: "/password-reset", Component: PasswordReset },
+  { path: "/terms", Component: TermsOfService },
+  { path: "/privacy", Component: PrivacyPolicy },
   { path: "/invoice/public/:token", Component: PublicInvoice },
   {
     path: "/",

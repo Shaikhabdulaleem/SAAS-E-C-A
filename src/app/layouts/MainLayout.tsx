@@ -483,6 +483,13 @@ export function MainLayout() {
         <main className="flex-1 py-6 px-4 sm:px-6 lg:px-8">
           <Outlet />
         </main>
+        <footer className="border-t border-border px-6 py-3 flex items-center justify-between text-xs text-muted-foreground">
+          <span>&copy; {new Date().getFullYear()} NexusHQ</span>
+          <div className="flex gap-4">
+            <Link to="/terms" className="hover:underline">Terms</Link>
+            <Link to="/privacy" className="hover:underline">Privacy</Link>
+          </div>
+        </footer>
       </div>
     </div>
   );

@@ -62,6 +62,53 @@ export class OpenApiController {
         },
         '/ai/usage': { get: { tags: ['ai'], summary: 'AI token usage and cost visibility' } },
         '/health': { get: { tags: ['providers'], summary: 'Application and dependency health' } },
+        '/health/ready': { get: { tags: ['providers'], summary: 'Readiness probe (k8s)' } },
+        '/health/live': { get: { tags: ['providers'], summary: 'Liveness probe (k8s)' } },
+        '/auth/register': { post: { tags: ['auth'], summary: 'Register a new user account' } },
+        '/auth/verify-email': { post: { tags: ['auth'], summary: 'Verify email with token' } },
+        '/auth/resend-verification': { post: { tags: ['auth'], summary: 'Resend email verification link' } },
+        '/auth/2fa/setup': { post: { tags: ['auth'], summary: 'Setup two-factor authentication' } },
+        '/auth/2fa/enable': { post: { tags: ['auth'], summary: 'Enable 2FA with TOTP code' } },
+        '/auth/2fa/disable': { post: { tags: ['auth'], summary: 'Disable 2FA with password' } },
+        '/auth/2fa/verify': { post: { tags: ['auth'], summary: 'Verify 2FA code during login' } },
+        '/billing/change-plan': { post: { tags: ['billing'], summary: 'Change subscription plan with proration' } },
+        '/billing/payment-methods/{id}': { delete: { tags: ['billing'], summary: 'Delete a payment method' } },
+        '/admin/tenants/{id}/export': { get: { tags: ['tenants'], summary: 'GDPR data export for tenant' } },
+        '/admin/tenants/{id}/hard': { delete: { tags: ['tenants'], summary: 'Permanently delete tenant (irreversible)' } },
+        '/notifications/unread-count': { get: { tags: ['notifications'], summary: 'Get unread notification count' } },
+        '/contacts': {
+          get: { tags: ['crm'], summary: 'List contacts with search, filter, sort, pagination' },
+          post: { tags: ['crm'], summary: 'Create a new contact' },
+        },
+        '/contacts/{id}': {
+          get: { tags: ['crm'], summary: 'Get contact details' },
+          patch: { tags: ['crm'], summary: 'Update a contact' },
+          delete: { tags: ['crm'], summary: 'Delete a contact' },
+        },
+        '/companies': {
+          get: { tags: ['crm'], summary: 'List companies' },
+          post: { tags: ['crm'], summary: 'Create a company' },
+        },
+        '/deals': {
+          get: { tags: ['crm'], summary: 'List deals' },
+          post: { tags: ['crm'], summary: 'Create a deal' },
+        },
+        '/email/campaigns': {
+          get: { tags: ['email'], summary: 'List email campaigns' },
+          post: { tags: ['email'], summary: 'Create an email campaign' },
+        },
+        '/email/templates': {
+          get: { tags: ['email'], summary: 'List email templates' },
+          post: { tags: ['email'], summary: 'Create a template' },
+        },
+        '/proposals': {
+          get: { tags: ['finance'], summary: 'List proposals' },
+          post: { tags: ['finance'], summary: 'Create a proposal' },
+        },
+        '/finance/invoices': {
+          get: { tags: ['finance'], summary: 'List invoices' },
+          post: { tags: ['finance'], summary: 'Create an invoice' },
+        },
       },
     };
   }

@@ -214,9 +214,13 @@ model User {
   initials      String
   tenantId      String?
   tenantName    String?
+  emailVerified         Boolean  @default(false)
+  emailVerificationToken String?
   twoFactorEnabled Boolean @default(false)
   twoFactorSecretCipher String?
   backupCodes      String?
+  failedLoginAttempts   Int      @default(0)
+  lockedUntil           DateTime?
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
   memberships   TenantUser[]

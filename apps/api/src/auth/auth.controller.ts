@@ -95,6 +95,17 @@ export class AuthController {
     return this.auth.register(body.name, body.email, body.password, this.getRequestMeta(request));
   }
 
+  @Post('verify-email')
+  verifyEmail(@Body() body: { token?: string }) {
+    return this.auth.verifyEmail(body.token);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('resend-verification')
+  resendVerification(@CurrentUser() user: AuthenticatedUser) {
+    return this.auth.resendVerification(user);
+  }
+
   private getRequestMeta(request: Request) {
     return {
       userAgent: request.headers['user-agent'],

@@ -21,6 +21,9 @@ export class AuthService {
     private readonly encryption: EncryptionService,
   ) {}
 
+  private static readonly MAX_FAILED_ATTEMPTS = 5;
+  private static readonly LOCKOUT_DURATION_MS = 15 * 60 * 1000;
+
   async login(email: string | undefined, password: string | undefined, meta: RequestMeta) {
     if (!email || !password) {
       throw new UnauthorizedException('Invalid email or password');
@@ -41,8 +44,31 @@ export class AuthService {
       },
     });
 
+    if (user?.lockedUntil && user.lockedUntil > new Date()) {
+      const minutesLeft = Math.ceil((user.lockedUntil.getTime() - Date.now()) / 60_000);
+      throw new UnauthorizedException(`Account locked. Try again in ${minutesLeft} minute${minutesLeft === 1 ? '' : 's'}.`);
+    }
+
     if (!user || !(await this.passwords.verify(password, user.passwordHash))) {
+      if (user) {
+        const attempts = user.failedLoginAttempts + 1;
+        const lockout = attempts >= AuthService.MAX_FAILED_ATTEMPTS
+          ? new Date(Date.now() + AuthService.LOCKOUT_DURATION_MS)
+          : null;
+        await this.prisma.user.update({
+          where: { id: user.id },
+          data: { failedLoginAttempts: attempts, lockedUntil: lockout },
+        });
+        if (lockout) {
+          await this.prisma.auditLog.create({ data: { actorUserId: user.id, event: 'auth.account.locked', metadata: { attempts, ipAddress: meta.ipAddress } } });
+          throw new UnauthorizedException('Too many failed attempts. Account locked for 15 minutes.');
+        }
+      }
       throw new UnauthorizedException('Invalid email or password');
+    }
+
+    if (user.failedLoginAttempts > 0) {
+      await this.prisma.user.update({ where: { id: user.id }, data: { failedLoginAttempts: 0, lockedUntil: null } });
     }
 
     if (user.twoFactorEnabled) {
@@ -118,6 +144,7 @@ export class AuthService {
     const existing = await this.prisma.user.findUnique({ where: { email: normalizedEmail } });
     if (existing) throw new BadRequestException('Email is already registered');
     const initials = name.trim().split(/\s+/).map((w) => w[0]?.toUpperCase()).join('').slice(0, 2);
+    const verificationToken = randomBytes(32).toString('hex');
     const user = await this.prisma.user.create({
       data: {
         name: name.trim(),
@@ -125,11 +152,78 @@ export class AuthService {
         passwordHash: await this.passwords.hash(password),
         role: UserRole.client,
         initials: initials || 'U',
+        emailVerified: false,
+        emailVerificationToken: this.hash(verificationToken),
       },
     });
     await this.prisma.auditLog.create({ data: { actorUserId: user.id, event: 'auth.user.registered', metadata: { email: normalizedEmail } } });
+    await this.sendVerificationEmail(normalizedEmail, name.trim(), verificationToken);
     const userWithMemberships = { ...user, memberships: [] as Array<{ tenant: { id: string; companyName: string; enabledServices: { key: string }[] } }> };
     return this.issueTokens(userWithMemberships, meta);
+  }
+
+  async verifyEmail(token: string | undefined) {
+    if (!token) throw new BadRequestException('Verification token is required');
+    const tokenHash = this.hash(token);
+    const user = await this.prisma.user.findFirst({ where: { emailVerificationToken: tokenHash } });
+    if (!user) throw new BadRequestException('Invalid or expired verification token');
+    if (user.emailVerified) return { success: true, alreadyVerified: true };
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: { emailVerified: true, emailVerificationToken: null },
+    });
+    await this.prisma.auditLog.create({ data: { actorUserId: user.id, event: 'auth.email.verified', metadata: {} } });
+    return { success: true };
+  }
+
+  async resendVerification(user: AuthenticatedUser) {
+    const dbUser = await this.prisma.user.findUnique({ where: { id: user.id } });
+    if (!dbUser) throw new NotFoundException('User not found');
+    if (dbUser.emailVerified) return { success: true, alreadyVerified: true };
+    const verificationToken = randomBytes(32).toString('hex');
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: { emailVerificationToken: this.hash(verificationToken) },
+    });
+    await this.sendVerificationEmail(dbUser.email, dbUser.name, verificationToken);
+    return { success: true };
+  }
+
+  private async sendVerificationEmail(to: string, name: string, token: string) {
+    const appUrl = process.env.APP_PUBLIC_URL ?? 'http://localhost:5173';
+    const verifyUrl = `${appUrl}/verify-email?token=${token}`;
+    const apiKey = process.env.SENDGRID_API_KEY;
+    const fromEmail = process.env.SYSTEM_FROM_EMAIL ?? 'noreply@nexushq.io';
+    const fromName = process.env.SYSTEM_FROM_NAME ?? 'NexusHQ';
+    const html = `
+      <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto;">
+        <h2>Verify your email</h2>
+        <p>Hi ${name},</p>
+        <p>Welcome to NexusHQ! Please verify your email address to get full access:</p>
+        <p style="text-align: center; margin: 24px 0;">
+          <a href="${verifyUrl}" style="background: #2563eb; color: #fff; padding: 12px 24px; border-radius: 6px; text-decoration: none; display: inline-block;">Verify Email</a>
+        </p>
+        <p style="font-size: 13px; color: #6b7280;">If you didn't create this account, you can safely ignore this email.</p>
+      </div>`;
+
+    if (!apiKey) {
+      console.warn(`[EMAIL-SIM] Verification email to ${to} — link: ${verifyUrl}`);
+      return;
+    }
+    try {
+      await fetch('https://api.sendgrid.com/v3/mail/send', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          personalizations: [{ to: [{ email: to }] }],
+          from: { email: fromEmail, name: fromName },
+          subject: 'Verify your NexusHQ email',
+          content: [{ type: 'text/html', value: html }],
+        }),
+      });
+    } catch (error) {
+      console.error('Verification email failed:', error instanceof Error ? error.message : error);
+    }
   }
 
   async refresh(refreshToken: string | undefined, meta: RequestMeta) {

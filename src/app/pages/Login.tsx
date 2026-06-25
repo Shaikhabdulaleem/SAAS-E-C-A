@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useAuth } from '../contexts/AuthContext';
+import { Link } from 'react-router';
 import { Eye, EyeOff, Zap, ArrowRight, Users, TrendingUp, Mail } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -134,6 +135,10 @@ export function Login() {
               </div>
             </div>
 
+            <div className="flex justify-end">
+              <Link to="/password-reset" className="text-xs text-primary hover:underline">Forgot password?</Link>
+            </div>
+
             {error && (
               <div className="px-4 py-3 rounded-lg bg-destructive/10 border border-destructive/20 text-destructive text-sm">
                 {error}
@@ -159,6 +164,11 @@ export function Login() {
             Don't have an account?{' '}
             <button className="text-primary hover:underline font-medium">Contact sales</button>
           </p>
+
+          <div className="flex justify-center gap-4 mt-4">
+            <Link to="/terms" className="text-xs text-muted-foreground hover:underline">Terms of Service</Link>
+            <Link to="/privacy" className="text-xs text-muted-foreground hover:underline">Privacy Policy</Link>
+          </div>
         </div>
       </div>
     </div>

@@ -3,15 +3,20 @@ import { router } from './routes';
 import { DataProvider } from './contexts/DataContext';
 import { AuthProvider } from './contexts/AuthContext';
 import { TenantProvider } from './contexts/TenantContext';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import { CookieConsent } from './components/CookieConsent';
 
 export default function App() {
   return (
-    <AuthProvider>
-      <TenantProvider>
-        <DataProvider>
-          <RouterProvider router={router} />
-        </DataProvider>
-      </TenantProvider>
-    </AuthProvider>
+    <ErrorBoundary>
+      <AuthProvider>
+        <TenantProvider>
+          <DataProvider>
+            <RouterProvider router={router} />
+            <CookieConsent />
+          </DataProvider>
+        </TenantProvider>
+      </AuthProvider>
+    </ErrorBoundary>
   );
 }
