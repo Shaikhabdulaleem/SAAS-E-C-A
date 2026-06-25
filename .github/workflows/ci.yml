@@ -8,6 +8,7 @@ on:
 
 env:
   NODE_VERSION: "20"
+  PNPM_VERSION: "9"
 
 jobs:
   # ── Lint & Typecheck ───────────────────────────────────
@@ -17,16 +18,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
+          cache: pnpm
 
-      - name: Install all dependencies
-        run: npm install
-
-      - name: Install API dependencies
-        run: cd apps/api && npm install
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
 
       - name: Generate Prisma client
         run: cd apps/api && npx prisma generate
@@ -77,13 +79,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
+          cache: pnpm
 
-      - name: Install API dependencies
-        run: cd apps/api && npm install
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
 
       - name: Generate Prisma client
         run: cd apps/api && npx prisma generate
@@ -92,7 +98,7 @@ jobs:
         run: cd apps/api && npx prisma migrate deploy
 
       - name: Run tests
-        run: cd apps/api && npm test -- --passWithNoTests
+        run: cd apps/api && npx jest --passWithNoTests
 
   # ── Security Audit ─────────────────────────────────────
   audit:
@@ -101,16 +107,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
+          cache: pnpm
 
-      - name: Audit root dependencies
-        run: npm audit --audit-level=critical || true
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
 
-      - name: Audit API dependencies
-        run: cd apps/api && npm audit --audit-level=critical || true
+      - name: Audit dependencies
+        run: pnpm audit --prod || true
 
   # ── Docker Build ───────────────────────────────────────
   docker:
